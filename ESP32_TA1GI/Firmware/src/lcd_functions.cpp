@@ -1,4 +1,8 @@
 #include "declarations.h"
+#include "lcd_functions.h"
+#include "radio_fucntions.h"
+
+
 // --- İKON TANIMLAMALARI ---
 // `const` anahtar kelimesi eklendi, böylece `declarations.h` içindeki `extern const` bildirimiyle eşleşiyorlar.
 const byte SPKR[3] = { B00000000, B00000000, B10000000 }; //pos 1 

@@ -18,26 +18,27 @@
 #include <algorithm>
 
 // --- ESP32 Pin Tanımlamaları ---
-#define I2C_SDA 21
-#define I2C_SCL 22
-#define KeypadIntPin 4
-#define FWD_POWER_PIN 34
-#define REF_POWER_PIN 35
-#define PLL_SEC 14
-#define BAND_SELECT_1 27
-#define BAND_SELECT_0 23
-#define PTT_OUTPUT_PIN 5
-#define PTT_INPUT_PIN 12
-#define RF_POWER_PIN 25
-#define ALERT_PIN 13
-#define MIC_PIN 26
-#define SQL_ACTIVE 2
-#define MUTE_PIN_1 18
-#define pll_clk_pin 17
-#define pll_data_pin 16
-#define pll_ena_pin 19
-#define GPS_RX_PIN 33
-#define GPS_TX_PIN 32
+#define I2C_SDA         25
+#define I2C_SCL         33
+#define KeypadIntPin    18
+#define FWD_POWER_PIN   34
+#define REF_POWER_PIN   35
+#define PLL_SEC         27
+#define BAND_SELECT_0   4
+#define BAND_SELECT_1   19
+#define PTT_OUTPUT_PIN  26
+#define PTT_INPUT_PIN   14
+#define RF_POWER_PIN    12
+#define ALERT_PIN       13
+#define MIC_PIN         22
+#define SQL_ACTIVE      21
+#define MUTE_PIN_1      17 //TX2
+#define pll_clk_pin     2
+#define pll_data_pin    15
+#define pll_ena_pin     16 //RX2
+#define GPS_RX_PIN      3  //RX0
+#define GPS_TX_PIN      1  //TX0
+//BOS BACAKLAR 5 22 23 32 
 
 // --- YENİ: DAC ile Sinüs Dalgası Üretimi İçin Tanımlamalar ---
 #define SINE_TABLE_SIZE 256
@@ -281,29 +282,7 @@ void connectToWiFi();
 void setupWebServer();
 void handleKeypress(char key); // YENİ: Web'den gelen tuş basımlarını işleyecek fonksiyon
 
-// radio_functions.cpp
-void IRAM_ATTR onDacTimer();
-void startDacTone(float frequency);
-void stopDacTone();
-void send_SPIBit(int Counter, byte length);
-void send_SPIEnable();
-void SetTone(int toneSTATE);
-void Alert_Tone(int ToneType);
-void SetPLLLock(uint32_t Frequency);
-void write_FRQ(uint32_t Frequency);
-void SetRFPower();
-void readRfPower();
 
-// lcd_functions.cpp
-void InitLCD();
-void sendToLcd(byte *data, byte position);
-void writeToLcd(const char text[]);
-void writeFRQToLcd(const char frq[9]);
-void scroll(const char *text, int speed);
-void displayAndScrollOnce(const char* text);
-void Greetings();
-void write_SHIFTtoLCD(uint16_t FRQshift);
-void write_TONEtoLCD(unsigned long tone_pos);
 
 // helper_functions.cpp
 // GÜNCELLENDİ: Hata düzeltmesi için fonksiyon bildirimleri güncellendi.

@@ -1,6 +1,9 @@
 #include "declarations.h"
 #include "esp_task_wdt.h" // RESET SORUNU İÇİN EKLENDİ
 #include <Update.h> // OTA için eklendi
+#include "lcd_functions.h"
+#include "radio_fucntions.h"
+
 
 // Cihazı Access Point modunda başlatan fonksiyon
 void startAPMode() {

@@ -1,4 +1,6 @@
 #include "declarations.h"
+#include "lcd_functions.h"
+#include "radio_fucntions.h"
 
 // CTCSS Ton Listesi
 float ctcss_tone_list[TOTAL_TONES] = {67,69.3,71.9,74.4,77,79.7,82.5,85.4,88.5,91.5,94.8,97.4,100,103.5,107.2,110.9,114.8,118.8,123,127.3};

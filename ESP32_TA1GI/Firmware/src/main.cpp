@@ -1,5 +1,7 @@
 #include "declarations.h"
 #include <Update.h> // OTA için eklendi
+#include "lcd_functions.h"
+#include "radio_fucntions.h"
 
 // --- HATA ÇÖZÜMÜ: Global Değişken Tanımlamaları ---
 // "undefined reference" hatasını gidermek için 'font' ve 'sine_wave' dizilerinin
@@ -213,7 +215,7 @@ void setup() {
 
   Serial.begin(9600);
   commandString.reserve(200);
-
+/* BARIS
   GPS_Serial.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
 
   initializeFileSystem();
@@ -228,7 +230,7 @@ void setup() {
     WiFi.mode(WIFI_OFF); // Güç tasarrufu için WiFi modülünü tamamen kapat
   }
   // --- BİTTİ: WiFi ve Web Sunucusunu Başlatma ---
-
+*/
   numberToFrequency(current_ch.frequency, FRQ);
   strcpy(FRQ_old,FRQ);
 
@@ -313,7 +315,6 @@ void loop() {
       writeFRQToLcd(FRQ);
       PrintMenu();
   }
-
 
   if (scrMODE==scrNORMAL)
   {
