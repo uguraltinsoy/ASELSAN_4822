@@ -1180,7 +1180,7 @@
 
             // Tarama Butonu
             scanBtn.addEventListener('click', async () => {
-                if (!confirm("Tarama işlemi, bir sinyal bulana veya bir tuşa basılana kadar web arayüzünü geçici olarak donduracaktır. Devam edilsin mi?")) return;
+                // if (!confirm("Tarama işlemi, bir sinyal bulana veya bir tuşa basılana kadar web arayüzünü geçici olarak donduracaktır. Devam edilsin mi?")) return;
                 try {
                     scanBtn.textContent = 'TARANIYOR';
                     scanBtn.disabled = true;
@@ -1196,7 +1196,7 @@
             
             // VNA Butonu
             vnaBtn.addEventListener('click', async () => {
-                 if (!confirm("VNA işlemi birkaç saniye sürebilir ve bu sırada arayüz donabilir. Devam edilsin mi?")) return;
+                 // if (!confirm("VNA işlemi birkaç saniye sürebilir ve bu sırada arayüz donabilir. Devam edilsin mi?")) return;
                 try {
                     vnaBtn.textContent = 'ANALİZ...';
                     vnaBtn.disabled = true;
