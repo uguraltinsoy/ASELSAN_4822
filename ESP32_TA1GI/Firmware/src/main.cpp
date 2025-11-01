@@ -206,16 +206,25 @@ void setup() {
   digitalWrite(pll_data_pin,LOW);
   digitalWrite(pll_ena_pin, LOW);
 
+  // Alert_Tone() fonksiyonunda kullanılan tone(), LEDC donanımını kullanır.
+  const int TONE_PIN = 13;
+  const int TONE_CHANNEL = 0;     // 0-15 valid channels
+  const int TONE_RESOLUTION = 8;  // bits (e.g. 8 bits -> duty 0-255)
+  const int DEFAULT_PWM_FREQ = 1000; // initial PWM freq for timer setup
+  ledcSetup(TONE_CHANNEL, DEFAULT_PWM_FREQ, TONE_RESOLUTION);
+  ledcAttachPin(TONE_PIN, TONE_CHANNEL);
+
+
   // DEĞİŞTİ: LEDC yerine DAC timer'ı başlat
   // 0 -> timer #0, 80 -> prescaler (80MHz/80=1MHz), true -> count up
   dac_timer = timerBegin(0, 80, true);
   timerAttachInterrupt(dac_timer, &onDacTimer, true); // Kesme fonksiyonunu bağla
 
   delay(100);
-
+  
   Serial.begin(9600);
   commandString.reserve(200);
-/* BARIS
+
   GPS_Serial.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
 
   initializeFileSystem();
@@ -230,7 +239,7 @@ void setup() {
     WiFi.mode(WIFI_OFF); // Güç tasarrufu için WiFi modülünü tamamen kapat
   }
   // --- BİTTİ: WiFi ve Web Sunucusunu Başlatma ---
-*/
+
   numberToFrequency(current_ch.frequency, FRQ);
   strcpy(FRQ_old,FRQ);
 
@@ -261,61 +270,6 @@ void loop() {
     ipToDisplay = ""; // Flag'i temizle, böylece tekrar gösterilmez.
   }
 
-  // YENİ: Web arayüzünden gelen asenkron istekleri ana döngüde işle
-  if (web_scan_request) {
-    web_scan_request = false; // Bayrağı hemen sıfırla ki tekrar çalışmasın
-    Serial.println("Ana donguden tarama baslatiliyor (web istegi)...");
-    startScan();
-  }
-
-  if (web_vna_request) {
-    web_vna_request = false; // Bayrağı hemen sıfırla
-    Serial.println("Ana donguden VNA baslatiliyor (web istegi)...");
-    
-    // Bu kod bloğu, fiziksel 'C' tuşuna basıldığındaki mantığın birebir kopyasıdır.
-    TRX_MODE = TX;
-    minSWR = 9999;
-    lowestFRQ=0; highestFRQ=0;
-    strcpy(FRQ_old,FRQ);
-    current_ch.shift_dir = noSHIFT;
-    SetRFPower();
-    long min_vna_freq;
-    long max_vna_freq;
-    int  stp_vna_freq;
-    if (radio_type==0) {
-      min_vna_freq = 14000;
-      max_vna_freq = 15000;
-      stp_vna_freq = 10;
-    } else {
-      min_vna_freq = 43000;
-      max_vna_freq = 45000;
-      stp_vna_freq = 10;
-    }
-    digitalWrite(PTT_OUTPUT_PIN,HIGH);
-    Serialprint("\r\n#VNA#\t%l\t%l\r\n",min_vna_freq,max_vna_freq); //START
-    for (long vna_freq=min_vna_freq; vna_freq < max_vna_freq; vna_freq += stp_vna_freq)
-      {
-        numberToFrequency(vna_freq*10,FRQ);
-        validFRQ = Calculate_Frequency(FRQ);
-        write_FRQ(current_ch.frequency);
-        writeFRQToLcd(FRQ);
-        Serialprint(">%d\t",vna_freq);
-        delay(100);
-        readRfPower();
-
-        if (readColumn() != 0) break; //a key is pressed
-      }
-      digitalWrite(PTT_OUTPUT_PIN,LOW);
-      Serialprint("@VNA@\t%d\t%d\r\n",min_vna_freq,max_vna_freq); //END
-      SetRFPower();
-      TRX_MODE = RX;
-      numberToFrequency((highestFRQ+lowestFRQ)/2,FRQ);
-      validFRQ = Calculate_Frequency(FRQ);
-      write_FRQ(current_ch.frequency);
-      writeFRQToLcd(FRQ);
-      PrintMenu();
-  }
-
   if (scrMODE==scrNORMAL)
   {
     if (TRX_MODE == TX)
@@ -328,7 +282,7 @@ void loop() {
     }
   }
 
-  Wire.beginTransmission(PCF8574_KEYB_LED);
+  Wire.beginTransmission(PCF8574_KEYB_LED); //TODO: dnguude surekli bu isi yapmamiza gerek yok
   Led_Status = 240;
   if ((CHANNEL_BUSY==0) || (SQL_MODE==SQL_OFF)) Led_Status = Led_Status - green_led;
   if (CHANNEL_BUSY==0) APRS_Counter = 0;
@@ -337,8 +291,8 @@ void loop() {
   if (pttToggler) send_packet(_STATUS,(aprs_freq_125*12.5));
 
   if (APRS_Counter < 2000) Led_Status = Led_Status - backlight;
-  Wire.write(Led_Status);
-  Wire.endTransmission();
+  Wire.write(Led_Status);//TODO: dnguude surekli bu isi yapmamiza gerek yok
+  Wire.endTransmission();//TODO: dnguude surekli bu isi yapmamiza gerek yok
 
   CHANNEL_BUSY = digitalRead(SQL_ACTIVE);
   if (CHANNEL_BUSY == 0) digitalWrite(MUTE_PIN_1, LOW);
@@ -428,16 +382,31 @@ void loop() {
     }
 
 
-  if (KeyVal != old_KeyVal) {
+  if ((KeyVal != old_KeyVal) | web_vna_request | web_scan_request) {
     if (KeyVal == 0) Alert_Tone(OK_tone);
 
     APRS_Counter = 0;
 
     scrTimer = TimeoutValue;
-
-    int satir = readRow();
-    int sutun = readColumn();
-    pressedKEY = keymap[sutun][satir];
+    if (web_vna_request)
+    {
+      web_vna_request = false; // Bayrağı hemen sıfırla ki tekrar çalışmasın
+      pressedKEY = 'C';
+      scrMODE == scrNORMAL;
+    }
+    else if (web_scan_request)
+    {
+      web_scan_request = false; // Bayrağı hemen sıfırla ki tekrar çalışmasın     
+      writeToLcd("SCAN     "); 
+      delay(1000);
+      startScan(); 
+    }
+    else
+    {
+      int satir = readRow();
+      int sutun = readColumn();
+      pressedKEY = keymap[sutun][satir];
+    }
 
   /* -----------------------------------------------------
      SCREEN MODE MENU..
@@ -603,7 +572,7 @@ void loop() {
                 write_FRQ(current_ch.frequency);
                 writeFRQToLcd(FRQ);
                 Serialprint(">%d\t",vna_freq);
-                delay(100);
+                delay(200);
                 readRfPower();
 
                 if (readColumn() != 0) break; //a key is pressed
@@ -752,7 +721,7 @@ void loop() {
     Wire.endTransmission();
     //Toggle interupt PIN state holder
     old_KeyVal = KeyVal;
-   } //KeyVal!=old_keyval
+  } //KeyVal!=old_keyval
 
 
 if (commandComplete) {

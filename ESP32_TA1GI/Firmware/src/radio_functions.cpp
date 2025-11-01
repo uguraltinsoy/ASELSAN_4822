@@ -60,6 +60,7 @@ void send_SPIEnable() {
   digitalWrite(pll_ena_pin, HIGH);
   delayMicroseconds(10); // Gecikme eklendi
   digitalWrite(pll_ena_pin, LOW);
+  delayMicroseconds(10); // Gecikme eklendi
 }
 
 // GÜNCELLENDİ: SetTone fonksiyonu artık DAC yöntemini kullanıyor
@@ -79,12 +80,11 @@ void Alert_Tone(int ToneType)
   // Önce DAC tonunu durdur (varsa)
   stopDacTone();
 
-  if (ToneType == OK_tone)   tone(ALERT_PIN,1000,ALERT_MODE);
-  if (ToneType == ERR_tone)  tone(ALERT_PIN,400 ,ALERT_MODE*2);
-  if (ToneType == SUCC_tone) {tone(ALERT_PIN,600 ,ALERT_MODE);delay(150);tone(ALERT_PIN,1000 ,ALERT_MODE);}
+  if (ToneType == OK_tone)   {ledcWriteTone(0,1000); delay(ALERT_MODE);}
+  if (ToneType == ERR_tone)  {ledcWriteTone(0,400); delay(ALERT_MODE*2);}
+  if (ToneType == SUCC_tone) {ledcWriteTone(0,600);delay(ALERT_MODE+150);ledcWriteTone(0,1000);delay(ALERT_MODE);}
   
-  delay(ALERT_MODE + 50); // Tonun bitmesi için bekle
-  noTone(ALERT_PIN);      // Uyarı tonunu kapat
+  ledcWriteTone(0,0);      // Uyarı tonunu kapat
   
   // CTCSS tonunu (gerekiyorsa) yeniden başlat
   SetTone(current_ch.tone_enabled);
@@ -154,8 +154,8 @@ void write_FRQ(uint32_t Frequency) {
     {
       if ((Frequency < 174000L) & (Frequency >= 164000L))  { digitalWrite(BAND_SELECT_0, LOW);  digitalWrite(BAND_SELECT_1, LOW);  }
       else if ((Frequency < 164000L) & (Frequency >= 154000L))  { digitalWrite(BAND_SELECT_0, LOW);  digitalWrite(BAND_SELECT_1, HIGH); }
-      else if ((Frequency < 154000L) & (Frequency >= 144000L))  { digitalWrite(BAND_SELECT_0, HIGH); digitalWrite(BAND_SELECT_1, LOW);  }
-      else if ((Frequency < 144000L) & (Frequency >= 134000L))  { digitalWrite(BAND_SELECT_0, HIGH); digitalWrite(BAND_SELECT_1, HIGH); }
+      else if ((Frequency < 154000L) & (Frequency >= 146000L))  { digitalWrite(BAND_SELECT_0, HIGH); digitalWrite(BAND_SELECT_1, LOW);  }
+      else if ((Frequency < 146000L) & (Frequency >= 134000L))  { digitalWrite(BAND_SELECT_0, HIGH); digitalWrite(BAND_SELECT_1, HIGH); }
     }
     else if(radio_type==1) //UHF
     {

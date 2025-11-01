@@ -679,7 +679,7 @@ void PrintMenu()
   Serialprint("T-APRS sessizlik suresi\n\r");
   Serialprint("M-APRS Mesaji\n\r");
   Serialprint("G-GPS Oku\n\r");
-  Serialprint("Seciminiz >");
+  Serialprint("Seciminiz >\r\n");
 }
 
 void commandYardim(char komut)
