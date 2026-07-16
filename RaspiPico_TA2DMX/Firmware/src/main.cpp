@@ -1,267 +1,1355 @@
+#include "main.h"
+#include "WebUI.h"
+#include <Arduino.h> //For platformio compability
+//#include <avr/wdt.h>
+#include <Wire.h>
+#include <EEPROM.h>
+//#include <avr/pgmspace.h>
+//#include <avr/interrupt.h>
+//#include <avr/io.h>
+#include <math.h>
 #include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include "pico/stdlib.h"
-#include "config.h"
-#include "radio.h"
-#include "display.h"
-#include "storage.h"
-#include "helpers.h"
-#include "keypad.h"
-#include "stdint-gcc.h"
-#include "pico/multicore.h"
-#include "ssb_rx.h"
-// IF Giriş pini  GP28/ADC2
-#define IF_INPUT_PIN 28
-int16_t ssb_fine_tune = 0;
+#include <SoftwareSerial.h>
+#include <TinyGPS.h>
+//#include "ASELSAN_lcd.h"
+//#include "../lib/fontsandicons.h"
+//#include "./libraries/PinChangeInt.h"
 
-// --- Global Değişkenler ---
-char FRQ[9];
-char FRQ_old[9];
-char lcd_buf[16]; 
+#define Streamprint(stream,format, ...) StreamPrint_progmem(stream,PSTR(format),##__VA_ARGS__)
 
-bool validFRQ = true;
-uint8_t numChar = 0;
-char pressedKEY = ' ';
-char old_pressedKEY = ' ';
+//Function definitions
+//TODO: move these to a header file
+void StreamPrint_progmem(Print &out,PGM_P format,...);
 
-uint8_t trx_mode = 0; 
-uint8_t scr_mode = 0; 
-uint32_t scr_timer = 0;
-uint8_t menu_index = 0; 
-const int MAX_MENU = 3; 
 
-bool sql_override = false; // Monitor
-bool key_lock = false;     
-bool light_latch = false;
-bool is_scanning = false;  
 
-uint32_t last_millis = 0;
-uint32_t ptt_start_time = 0;
-uint32_t key_press_time = 0; 
 
-volatile bool keypad_event_flag = false; // Keypad kesmesi
 
-void core1_entry() {
-    // SSB alıcısı
-    ssb_receiver.init(IF_INPUT_PIN, AUDIO_PWM_PIN);
-    ssb_receiver.start();
-    ssb_receiver.process_loop();
+
+//Interrupts      
+// PCINT20 is in PCINT2 vector 
+//ISR(PCINT20_vect) 
+//{
+// KeyVal = digitalRead(KeypadIntPin);
+// //digitalWrite(PTT_OUTPUT_PIN, KeyVal); //for testing
+//}
+
+
+void Alert_Tone(int ToneType)
+{
+  if (TRX_MODE == TX)  return; //If we are transmitting, do not play tones, because tone pin might be busy with CTCSS generation
+  noTone(MIC_PIN); //First silence the TONE output first
+  pinMode(MIC_PIN, OUTPUT); 
+  digitalWrite(MIC_PIN, LOW); // Provide solid ground for microphone to prevent RX audio muffling
+  if (ToneType == OK_tone)  { tone(ALERT_PIN,1000,ALERT_MODE); Serialprint(" OK\r\n");}   //short 1Khz is OK  tone
+  if (ToneType == ERR_tone)  tone(ALERT_PIN,400 ,ALERT_MODE*2); //long 440hz is ERR tone
+  if (ToneType == SUCC_tone) {tone(ALERT_PIN,600 ,ALERT_MODE);delay(200);tone(ALERT_PIN,1000 ,ALERT_MODE);} //2 500msec success tones
+  delay(ALERT_MODE); //TODO: find a better way to play two tones simultaneously
+  SetTone(current_ch.tone_enabled); //resume Tone Generation 
+}
+
+
+/*
+char numberToArray (int Number) //max 4 digits
+{
+//TODO: 
+//  char result = "         ";
+//  result[0] = String(Number / 1000);
+//  result[1] = String(Number / 100);
+//  result[2] = String(Number / 10);
+//  result[3] = String(Number / 1);
+  
+  
+}
+*/
+boolean Calculate_Frequency (char mFRQ[9]) {
+  uint32_t calc_freq = 0;
+  if (mFRQ[0] >= '0' && mFRQ[0] <= '9') calc_freq += (mFRQ[0]-48) * 100000L;
+  if (mFRQ[1] >= '0' && mFRQ[1] <= '9') calc_freq += (mFRQ[1]-48) * 10000L;
+  if (mFRQ[2] >= '0' && mFRQ[2] <= '9') calc_freq += (mFRQ[2]-48) * 1000L;
+  if (mFRQ[4] >= '0' && mFRQ[4] <= '9') calc_freq += (mFRQ[4]-48) * 100L;
+  if (mFRQ[5] >= '0' && mFRQ[5] <= '9') calc_freq += (mFRQ[5]-48) * 10L;
+  if (mFRQ[6] >= '0' && mFRQ[6] <= '9') calc_freq += (mFRQ[6]-48) * 1L;
+
+  if (radio_type==0 && (calc_freq >= (freqLimits.trx_min_25*25)) && (calc_freq <= (freqLimits.trx_max_25*25))) {
+      current_ch.frequency = calc_freq;
+      return true; //valid frequency for VHF
+  }
+  else if (radio_type==1 && (calc_freq >= 400000L) && (calc_freq < 468400L)) {
+      current_ch.frequency = calc_freq;
+      return true; //valid frequency for UHF
+  }
+  else {
+      Alert_Tone(ERR_tone);
+      return false; //invalid frequency
+  }
+}
+
+
+void SetPLLLock(uint32_t Frequency)
+{
+  int R_Counter =0;
+  int N_Counter = 0;
+  int A_Counter = 0;
+  if(radio_type==0) //TODO: else portion seems exactly the same ????
+  {
+    if (TRX_MODE == RX) Frequency = Frequency + 45000L;
+    if (TRX_MODE == TX) Frequency = Frequency + (current_ch.shift_dir * current_ch.shift) ; // Add/remove transmission shift
+  
+     R_Counter = 512;  //12800 / 25 = 512 (12.8Mhz reference clock, 25Khz step)
+     N_Counter = Frequency / 25 / 80 ; //prescaler = 80, channel steps 25Khz
+     A_Counter = (Frequency / 25) - (80 * N_Counter);
+
+
+    digitalWrite(PLL_SEC, LOW); //SELECT PLL for SPI BUS  
+    send_SPIBit(R_Counter,14);
+    send_SPIBit(1,1); // Tell PLL that it was the R Counter
+    send_SPIEnable();
+    send_SPIBit(N_Counter,10);
+    send_SPIBit(A_Counter,7);
+    send_SPIBit(0,1); // Tell PLL that it was the A and N Counters  
+    send_SPIEnable();  
+    digitalWrite(PLL_SEC, HIGH); //DE-SELECT PLL for SPI BUS
+  }
+  else
+  {
+    if (TRX_MODE == RX) Frequency = Frequency - 45000L;
+    if (TRX_MODE == TX) Frequency = Frequency + (current_ch.shift_dir * current_ch.shift) ; // Add/remove transmission shift
+  
+     R_Counter = 512;  //12800 / 25 = 512 (12.8Mhz reference clock, 25Khz step)
+     N_Counter = Frequency / 25 / 80 ; //prescaler = 80, channel steps 25Khz
+     A_Counter =(Frequency / 25) - (80 * N_Counter);
+
+  
+    digitalWrite(PLL_SEC, LOW);
+    send_SPIBit(R_Counter,14);
+    send_SPIBit(1,1); 
+    send_SPIEnable();
+    send_SPIBit(N_Counter,10);
+    send_SPIBit(A_Counter,7);
+    send_SPIBit(0,1); 
+    send_SPIEnable();  
+    digitalWrite(PLL_SEC, HIGH); 
+  }
+}
+
+
+void write_FRQ(uint32_t Frequency) {
+//VHF BAND SELECTION  
+//BS0 BS1
+// 0  0     152.2   172.6
+// 0  1     147.9   165.5
+// 1  0     141.6   157.1
+// 1  1     137.2   151.4
+//+------------+---------------+-----+-----+
+//| Radio Type |  Frequency    | BS0 | BS1 |
+//+------------+---------------+-----+-----+
+//| VHF        | 152.2   172.6 |   0 |   0 |
+//|            | 147.9   165.5 |   0 |   1 |
+//|            | 141.6   157.1 |   1 |   0 |
+//|            | 137.2   151.4 |   1 |   1 |
+//+------------+---------------+-----+-----+
+
+//+------------+---------------+-----+-----+
+//| Radio Type |  Frequency    | BS0 | BS1 |
+//+------------+---------------+-----+-----+
+//| UHF        | 406.0   418.0 |   1 |   1 |
+//|            | 418.0   430.0 |   0 |   1 |
+//|            | 440.0   455.0 |   1 |   0 |
+//|            | 455.0   470.0 |   0 |   0 |
+//+------------+---------------+-----+-----+
+
+//uint32_t UpdatedFrq = 0;
+//float divider = 0;
+  if (validFRQ) {
+    if(radio_type==0)
+    {
+      if ((Frequency < 174000L) & (Frequency >= (164000L)))  { digitalWrite(BAND_SELECT_0, LOW);  digitalWrite(BAND_SELECT_1, LOW);  }
+      if ((Frequency < 164000L) & (Frequency >= (154000L)))  { digitalWrite(BAND_SELECT_0, LOW);  digitalWrite(BAND_SELECT_1, HIGH); } 
+      if ((Frequency < 154000L) & (Frequency >= (144000L)))  { digitalWrite(BAND_SELECT_0, HIGH); digitalWrite(BAND_SELECT_1, LOW);  } 
+      if ((Frequency < 144000L) & (Frequency >= (134000L)))  { digitalWrite(BAND_SELECT_0, HIGH); digitalWrite(BAND_SELECT_1, HIGH); } 
+    }
+    else if(radio_type==1)
+    {
+       if ((Frequency < 470000L) & (Frequency >= (452000L))) {digitalWrite(BAND_SELECT_0, LOW); digitalWrite(BAND_SELECT_1, LOW); }
+       if ((Frequency < 452000L) & (Frequency >= (430000L))) {digitalWrite(BAND_SELECT_0, HIGH);digitalWrite(BAND_SELECT_1, HIGH);}
+    // Update EEPROM for last used Frequncy
+    }
+//BD1    current_ch.frequency = Frequency; //UpdatedFrq;
+//BD1    EEPROM.put(EEPROM_CURRCHNL_BLCKSTART,current_ch); 
+    SetPLLLock(Frequency);
+  } //validFRQ 
+  writeFRQToLcd(FRQ);
 }
 
 
 
-void alert_tone(int type) {
-    if(type == 1) start_tone(1000); 
-    if(type == 2) start_tone(400);  
-    sleep_ms(100);
-    stop_tone();
+
+
+
+
+
+
+//void SetRFPower(int rfpowerSTATE) {
+void SetRFPower() {
+    digitalWrite(RF_POWER_PIN, RF_POWER_STATE);
 }
 
-void gpio_callback(uint gpio, uint32_t events) {
-    if (gpio == KEYPAD_INT_PIN) {
-        keypad_event_flag = true; 
-    }
+void setRadioPower() {
+  //Is the radio turned on ?
+  //SYS_MODE = digitalRead(POWER_ON_OFF);
+  //if ( SYS_MODE == SYS_ON)  digitalWrite(POWER_ON_PIN, HIGH) ;
+  //if ( SYS_MODE == SYS_OFF) digitalWrite(POWER_ON_PIN, LOW) ; 
+
+  //if ( SYS_MODE == SYS_ON)  Serial.println("POWER ON")  ; 
+  //if ( SYS_MODE == SYS_OFF) Serial.println("POWER OFF") ; 
 }
 
-void update_display() {
-    memset(lcd_buf, 0, sizeof(lcd_buf));
 
-    if (key_lock) { display_write_text("LOCKED  "); return; }
-    if (scr_mode == 3) { display_write_text("SCAN... "); return; }
-
-    if (scr_mode == 0) { 
-        if (sql_override) display_write_text("MONITOR ");
-        else { numberToFrequency(current_channel.frequency, FRQ); display_write_freq(FRQ); }
-    } 
-    else if (scr_mode == 1 || scr_mode == 2) { 
-        if (menu_index == 0) strcpy(lcd_buf, scr_mode==1 ? "SET SHFT" : (current_channel.shift_dir==0 ? "SIMPLX" : (current_channel.shift_dir==1 ? "PLUS +" : "MINUS -")));
-        else if (menu_index == 1) { if(scr_mode==1) strcpy(lcd_buf, "SET OFST"); else sprintf(lcd_buf, "S %02d.%03d", current_channel.shift/1000, current_channel.shift%1000); }
-        else if (menu_index == 2) { if(scr_mode==1) strcpy(lcd_buf, "SET TONE"); else get_tone_name(current_channel.tone_pos, lcd_buf); }
-        else if (menu_index == 3) { if(scr_mode==1) strcpy(lcd_buf, "TONE SW"); else strcpy(lcd_buf, current_channel.tone_enabled ? "TONE ON" : "TONE OFF"); }
-        else if (menu_index == 4) { sprintf(lcd_buf, "FINE %d", ssb_fine_tune); display_write_text(lcd_buf); }
-    }
-}
-
-void check_squelch() {
-    bool speaker_on = false;
-    if (gpio_get(SQL_ACTIVE_PIN) == 0) speaker_on = true;
-    if (sql_override) speaker_on = true;
-
-    if (speaker_on) {
-        gpio_put(MUTE_PIN, 0); 
-        set_led(LED_GREEN, true);
-    } else {
-        gpio_put(MUTE_PIN, 1); 
-        set_led(LED_GREEN, false);
-    }
-}
-
-void process_scan() {
-    if (!is_scanning) return;
-    if (gpio_get(SQL_ACTIVE_PIN) == 0) { 
-        scr_mode = 3; 
-        numberToFrequency(current_channel.frequency, FRQ);
-        display_write_freq(FRQ);
-        return; 
-    }
-    static uint32_t last_scan_time = 0;
-    if (to_ms_since_boot(get_absolute_time()) - last_scan_time > 150) {
-        last_scan_time = to_ms_since_boot(get_absolute_time());
-        current_channel.frequency += 25; 
-        if (current_channel.frequency > 440000 && current_channel.frequency < 400000) current_channel.frequency = 144000;
-        if (current_channel.frequency > 470000) current_channel.frequency = 430000;
-        set_FRQ(current_channel.frequency);
-        display_write_text("SCANNING");
-    }
-}
-
-void handle_keypad_input() {
-    pressedKEY = keypad_read();
-    
-    // if (pressedKEY != 0) {
-    //     printf("Key Processed: %c\n", pressedKEY);
-    // }
-
-    static bool long_press_handled = false;
-    if (pressedKEY != 0 && pressedKEY == old_pressedKEY) {
-        if (!long_press_handled && (to_ms_since_boot(get_absolute_time()) - key_press_time > 1500)) {
-            if (pressedKEY == 'S') { 
-                is_scanning = !is_scanning;
-                if(is_scanning) { sql_override = false; scr_mode = 3; } else scr_mode = 0;
-                alert_tone(is_scanning ? 1 : 2); update_display();
-            }
-            long_press_handled = true; 
-        }
-    } else {
-        long_press_handled = false; 
-        if (pressedKEY != 0) key_press_time = to_ms_since_boot(get_absolute_time());
-    }
-
-    if (pressedKEY != 0 && pressedKEY != old_pressedKEY) {
-        alert_tone(1); scr_timer = 10000; 
-
-        if (is_scanning) { is_scanning = false; scr_mode = 0; update_display(); old_pressedKEY = pressedKEY; return; }
-        if (key_lock) { if (pressedKEY == '#') { key_lock = false; display_write_text("UNLOCKED"); sleep_ms(500); update_display(); } old_pressedKEY = pressedKEY; return; }
-
-        if (scr_mode == 0) { 
-            if (pressedKEY >= '0' && pressedKEY <= '9') {
-                if (sql_override) sql_override = false; 
-                if (numChar == 0) { strcpy(FRQ_old, FRQ); memset(FRQ, ' ', 8); FRQ[8]=0; }
-                if (numChar <= 6) { FRQ[numChar++] = pressedKEY; if (numChar == 3) FRQ[numChar++] = '.'; display_write_freq(FRQ); }
-                if (numChar == 7) {
-                    uint32_t new_freq;
-                    if (Calculate_Frequency(FRQ, &new_freq)) {
-                        current_channel.frequency = new_freq; set_FRQ(current_channel.frequency); save_channel(&current_channel); update_display();
-                    } else { alert_tone(2); strcpy(FRQ, FRQ_old); update_display(); }
-                    numChar = 0;
-                }
-            }
-            else if (pressedKEY == 'U') { current_channel.frequency += 25; set_FRQ(current_channel.frequency); update_display(); }
-            else if (pressedKEY == 'D') { current_channel.frequency -= 25; set_FRQ(current_channel.frequency); update_display(); }
-            else if (pressedKEY == 'M') { scr_mode = 1; menu_index = 0; update_display(); }
-            
-            else if (pressedKEY == 'S') { 
-                sql_override = !sql_override; 
-                update_display();
-                check_squelch(); 
-            }
-            
-            else if (pressedKEY == 'C') { light_latch = !light_latch; set_backlight(light_latch); }
-            else if (pressedKEY == '*') { current_channel.tone_enabled = !current_channel.tone_enabled; update_display(); }
-            else if (pressedKEY == '#') { key_lock = true; display_write_text("LOCKED  "); sleep_ms(500); update_display(); }
-        }
-        else if (scr_mode == 1) { 
-            if (pressedKEY == 'U') { menu_index++; if (menu_index > MAX_MENU) menu_index = 0; update_display(); }
-            else if (pressedKEY == 'D') { if (menu_index == 0) menu_index = MAX_MENU; else menu_index--; update_display(); }
-            else if (pressedKEY == 'M' || pressedKEY == '*') { scr_mode = 2; update_display(); }
-            else if (pressedKEY == '#') { scr_mode = 0; save_channel(&current_channel); update_display(); }
-        }
-        else if (scr_mode == 2) { 
-            bool changed = false;
-            if (pressedKEY == 'U') { changed=true; if(menu_index==0) current_channel.shift_dir = (current_channel.shift_dir==1)?-1:current_channel.shift_dir+1; else if(menu_index==1) current_channel.shift+=50; else if(menu_index==2) {current_channel.tone_pos++; if(current_channel.tone_pos>=tone_count)current_channel.tone_pos=0;} else if(menu_index==3) current_channel.tone_enabled=!current_channel.tone_enabled; }
-            else if (pressedKEY == 'D') { changed=true; if(menu_index==0) current_channel.shift_dir = (current_channel.shift_dir==-1)?1:current_channel.shift_dir-1; else if(menu_index==1) {if(current_channel.shift>=50)current_channel.shift-=50;} else if(menu_index==2) {if(current_channel.tone_pos==0)current_channel.tone_pos=tone_count-1;else current_channel.tone_pos--;} else if(menu_index==3) current_channel.tone_enabled=!current_channel.tone_enabled; }
-            else if (pressedKEY == 'M' || pressedKEY == '#' || pressedKEY == '*') { scr_mode = 1; update_display(); return; }
-            else if (menu_index == 4) {
-                if (pressedKEY == 'U') ssb_fine_tune += 10;// 10 Hz adımlarla ince ayar
-                if (pressedKEY == 'D') ssb_fine_tune -= 10;
-                ssb_receiver.set_fine_tune(ssb_fine_tune);
-            }            
-            if(changed) update_display();
-        }
-    }
-    old_pressedKEY = pressedKEY;
-}
-
-int main() {
-    stdio_init_all();
-    multicore_launch_core1(core1_entry);
-
-    sleep_ms(2000);
-
-    storage_init();
-    load_channel(&current_channel);
-    
-    if (current_channel.frequency < 10000 || current_channel.frequency > 500000) {
-        current_channel.frequency = 145000; current_channel.shift = 600; 
-        current_channel.tone_enabled = false; current_channel.shift_dir = 0;
-    }
-
-    radio_init();
-    display_init();
-    keypad_init();
+void readRfPower()
+{
+   int refPower = 0;
+   int fwdPower = 0;
    
-    keypad_event_flag = false;
-    gpio_set_irq_enabled_with_callback(KEYPAD_INT_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+   fwdPower = analogRead(FWD_POWER_PIN);
+   refPower = analogRead(REF_POWER_PIN);
+   //refPower = refPower * 2;
+   //int Ptoplam = fwdPower + refPower;
+   int Pfark   = fwdPower - refPower;
+   float swr = Pfark; //gecici (float)Ptoplam / (float)Pfark;
+   Serial.print("\t");
+   Serial.print(fwdPower);
+   Serial.print("\t");
+   Serial.print(refPower);
+   Serial.print("\t");
+   Serial.print(swr);
+   Serial.println("");
+   if (swr < minSWR)
+   {
+      minSWR=swr;
+      lowestFRQ=current_ch.frequency;
+      highestFRQ=current_ch.frequency;
+   } else if (swr == minSWR)
+   {
+      highestFRQ=current_ch.frequency;
+   }
 
-    set_backlight(true);
-    display_write_text("ASELSAN ");
-    sleep_ms(1000);
-    update_display(); 
-    set_FRQ(current_channel.frequency);
-    
-    while (1) {
-        uint32_t current_millis = to_ms_since_boot(get_absolute_time());
-
-        if (gpio_get(PTT_IN_PIN) == 1) { 
-            if (is_scanning) is_scanning = false;
-            if (trx_mode == 0) {
-                trx_mode = 1; ptt_start_time = current_millis;
-                uint32_t tx_freq = current_channel.frequency;
-                if(current_channel.shift_dir == 1) tx_freq += current_channel.shift;      
-                else if(current_channel.shift_dir == -1) tx_freq -= current_channel.shift;
-                set_FRQ(tx_freq);
-                if(current_channel.tone_enabled) start_tone(tone_list[current_channel.tone_pos]);
-            }
-            if ((current_millis - ptt_start_time) > 180000) { 
-                 trx_mode = 0; gpio_put(PTT_OUT_PIN, 0); stop_tone(); alert_tone(2);
-            }
-        } else { 
-            // if (trx_mode == 1) {
-                set_FRQ(current_channel.frequency + IF_FREQ); 
-            // }
-        }
-
-        check_squelch(); 
-        process_scan(); 
-        if (keypad_event_flag) {
-            gpio_set_irq_enabled(KEYPAD_INT_PIN, GPIO_IRQ_EDGE_FALL, false);
-            sleep_ms(30); 
-            handle_keypad_input(); 
-            keypad_event_flag = false; 
-            gpio_set_irq_enabled(KEYPAD_INT_PIN, GPIO_IRQ_EDGE_FALL, true);            
-        }
-        
-        if (pressedKEY != 0) {
-             handle_keypad_input();
-             sleep_ms(50); // Çok hızlı döngüyü yavaşlat
-        }
-
-        if (scr_mode != 0 && scr_mode != 3 && scr_timer > 0) { 
-            scr_timer--;
-            if (scr_timer == 0) { scr_mode = 0; save_channel(&current_channel); update_display(); }
-        }
-        sleep_ms(5);
-    }
-    return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+  TOT Function
+
+  BAKIM ONARIM KITABI - SF. 205 - 6/25
+  
+  Göndermede kalma süresi isteğe göre 0-225 saniye aralığında 15 saniyelik adımlarla seçilebilir;
+  standart programda 1 dakikadır. Zaman sınırlama süresi bitiminde tekrar bas/konuş mandalina basıldığında
+  telsizin göndermeye geçmesi için gereken süre de isteğe göre 0 ile 75 saniye aralığında 5 saniyelik
+  adımlarla programlanabilir; standart alarak 0 saniyedir.
+*/
+
+
+int TOT_FLAG = 0;
+int TOT_WARN_STATE = 1;
+
+void changeTotSettings(uint8_t timeout, uint8_t lock){
+  tot_t  tot_values_new;
+  tot_values_new.time_out_time = timeout;
+  tot_values_new.lock_time = lock;
+  EEPROM.put(EEPROM_TOT, tot_values_new);
+  tot_values = tot_values_new;
+}
+
+uint8_t TXTimeOutTimer(uint8_t PTT_PIN_STATE) {
+  unsigned long currentMillis = millis();
+  if (PTT_PIN_STATE == HIGH) {
+    if (currentMillis - prevTotMillis >= tot_values.time_out_time* 1000) {
+      if (currentMillis - prevTotMillis >= tot_values.time_out_time* 1000 + tot_values.lock_time* 1000) {
+        prevTotMillis = currentMillis;
+      }
+      //digitalWrite(POW_INH, HIGH);
+      //Serial.println("transmit interrupted by tot...");
+      TOT_FLAG = 1;
+      return LOW;
+    }
+    TOT_FLAG = 0;
+    TOT_WARN_STATE = 1;
+    return HIGH;
+  } else {
+    TOT_FLAG = 0;
+    TOT_WARN_STATE = 1;
+    return LOW;
+  }
+}
+
+
+
+
+
+// Stores frequency data to the desired EEPROM location
+
+
+
+/*
+ * Retrieves the requested Memory Channel Information from EEPROM and returns a memorych_t tyep object
+ */
+//memorych_t GetPrintMemoryChannelInfo(int8_t channel_number, boolean dbg) {
+
+
+/*
+ * Retrieves the requested Memory Channel Information from EEPROM
+ * TODO: combine this with the previuous function
+ */
+
+
+
+
+
+
+/*
+ * Change device type between VHF/UHF
+ */
+
+
+/*
+ * Change startup screen msg
+ */
+
+
+/*
+ * Print the configurations in form of JSON array to Serial Port
+ */
+
+
+
+/*
+ * Print the memory channels in form of JSON array to Serial Port
+ */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+int readColumn()
+{
+    Wire.beginTransmission(0x20); //Here we're pushing VCC from one of PCF8574 and reading the other
+    Wire.write((uint8_t)0x00); 
+    Wire.endTransmission();
+    Wire.beginTransmission(0x21);
+    Wire.write((uint8_t)0xFF); 
+    Wire.endTransmission();
+    
+    Wire.requestFrom(0x21,1);
+    int c = Wire.read();
+    c = 255 - c;
+    int sutun = 0 ;
+    if (c == 8) sutun = 0;
+    if (c == 4) sutun = 1;
+    if (c == 2) sutun = 2;
+    if (c == 1) sutun = 3;
+
+    
+
+    return sutun;
+}
+
+int readRow()
+{
+    Wire.requestFrom(0x20,1);
+    int r = Wire.read();    // receive a byte as character
+    r = 255 - (r | 0x03) ; 
+    r = r >> 3;
+    int satir = 5;
+    if (r == 16) satir = 0;
+    if (r ==  8) satir = 1;
+    if (r ==  4) satir = 2;
+    if (r ==  2) satir = 3;
+    if (r ==  1) satir = 4;
+    
+    return satir;
+}
+
+
+
+
+void startScan()
+{
+
+
+  unsigned long scan_frequency = 144000;
+  int8_t frq_step = 25;
+  while (1)
+  {
+        scan_frequency += frq_step;
+        if (scan_frequency >= (freqLimits.scn_max_25*25)) scan_frequency = (freqLimits.scn_min_25*25);
+        else if (scan_frequency <= (freqLimits.scn_min_25*25)) scan_frequency = (freqLimits.scn_max_25*25);
+
+        numberToFrequency(scan_frequency,FRQ);
+        validFRQ = Calculate_Frequency(FRQ);
+        write_FRQ(current_ch.frequency);
+        writeFRQToLcd(FRQ);
+        //Serialprint(">%d\t",scan_freq);
+        delay(100);
+        CHANNEL_BUSY = digitalRead(SQL_ACTIVE);  
+        //int sutun = readColumn();
+        //int satir = readRow();
+        //Serialprint("keypres= %d %d \r\n",sutun,satir);
+        if (CHANNEL_BUSY == 0) break;
+        if (readColumn() != 0) break;
+  }
+
+}
+
+
+void setup() {
+  Wire.setSDA(16);
+  Wire.setSCL(17);
+  Wire.begin();
+  EEPROM.begin(1024); // Pico requires EEPROM.begin
+  //wdt_enable(WDTO_4S);
+//pin modes and initial states
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
+  pinMode(SQL_ACTIVE, INPUT); // Use external pull-up from the radio
+  pinMode(MIC_PIN, OUTPUT);
+  digitalWrite(MIC_PIN, LOW); // Provide solid ground for microphone at startup to prevent RX audio muffling
+
+  pinMode(RF_POWER_PIN, OUTPUT); //RF power control is output
+  digitalWrite(RF_POWER_PIN, RF_POWER_STATE);
+  //TODO: store last power state and restore on every boot 
+  
+  pinMode(MUTE_PIN_1, OUTPUT);
+  digitalWrite(MUTE_PIN_1, HIGH); //Mute the Audio output
+
+  pinMode(BAND_SELECT_0, OUTPUT);
+  pinMode(BAND_SELECT_1, OUTPUT);
+
+  pinMode(PTT_INPUT_PIN,  INPUT_PULLUP);
+  pinMode(PTT_OUTPUT_PIN, OUTPUT);
+  digitalWrite(PTT_OUTPUT_PIN, LOW); //No PTT at startup
+
+  pinMode(FWD_POWER_PIN, INPUT);
+  pinMode(REF_POWER_PIN, INPUT);
+
+  //pinMode(KeypadIntPin,    INPUT);
+	pinMode(KeypadIntPin, INPUT_PULLUP);
+ // attachPinChangeInterrupt(KeypadIntPin, KeyPadInterrupt, RISING);						   
+  pinMode(pll_clk_pin, OUTPUT);
+  pinMode(pll_data_pin,OUTPUT);
+  pinMode(pll_ena_pin, OUTPUT);
+  pinMode(PLL_SEC, OUTPUT);
+
+  digitalWrite(pll_clk_pin, LOW);
+  digitalWrite(pll_data_pin,LOW);
+  digitalWrite(pll_ena_pin, LOW);
+
+  //cli(); // Turn Off Interrupts
+  //PCICR = (1 << PCIE2);  
+  //PCMSK2 |= (1 << PCINT20); 
+  //sei();
+  delay(100);
+
+  Serial.begin(115200);
+  delay(3000); // Wait for USB Serial connection to be established
+  commandString.reserve(200);
+
+  // Check EEPROM for stored values
+  uint8_t eeprom_state=0;
+ // EEPROM.write(0,127);
+  eeprom_state = EEPROM.read(0);//EEPROM Check For Modification Board
+  //Serialprint("ACILIS DEGERI %d\r\n",eeprom_state);
+  
+  if (eeprom_state == 129) {
+      Serial.println("EEPROM Sifirlaniyor...");
+      initialize_eeprom();
+      EEPROM.write(0, 128); // Sifirlandigini isaretle
+      EEPROM.commit();
+  } else if (EEPROM.read(1) != SW_MAJOR || EEPROM.read(2) != SW_MINOR) {
+      Serial.println("Yazilim Guncellendi, EEPROM versiyon damgasi yenileniyor...");
+      EEPROM.write(1, SW_MAJOR);
+      EEPROM.write(2, SW_MINOR);
+      EEPROM.commit();
+  }
+
+  radio_type = EEPROM.read(17);//UHF VHF Seçimi
+  //Serialprint("CIHAZ TIPI %d\r\n",radio_type);
+
+  eeprom_readAPRS();
+
+  EEPROM.get(EEPROM_CURRCHNL_BLCKSTART, current_ch);
+  numberToFrequency(current_ch.frequency, FRQ);
+  strcpy(FRQ_old,FRQ);
+
+  op_mode = EEPROM.read(EEPROM_OP_MODE_ADDR);
+  if (op_mode > 1) op_mode = MODE_VFO;
+  
+  current_memory_channel = EEPROM.read(EEPROM_CURR_MEMCH_ADDR);
+  if (current_memory_channel < 1 || current_memory_channel > 50) current_memory_channel = 1;
+  
+  if (op_mode == MODE_MR) {
+      char chStr[3];
+      sprintf(chStr, "%02d", current_memory_channel);
+      GetMemoryChannel(chStr); 
+  }
+ 
+  SetTone(current_ch.tone_enabled);
+
+  EEPROM.get(EEPROM_SPECIALFRQ_BLCKSTART,freqLimits);
+
+  EEPROM.get(EEPROM_TOT, tot_values);
+
+  //setRadioPower();  //Check power switch mode and turn adio on immediately
+  //pinMode(POWER_ON_OFF, INPUT);
+  //pinMode(POWER_ON_PIN, OUTPUT);
+ 
+  memset(matrix, 0, 24);
+  Wire.begin(); 
+  Wire.setClock(100000); // PCF8576 maximum is 100kHz
+  
+  // Enable internal pullups for I2C to prevent hang if missing externally
+  pinMode(16, INPUT_PULLUP);
+  pinMode(17, INPUT_PULLUP);
+  
+  delay(100);  // Give some time to boot
+
+  Serial.println("I2C Taramasi Basliyor...");
+  byte error, address;
+  int nDevices = 0;
+  for(address = 1; address < 127; address++ ) {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+    if (error == 0) {
+      Serial.print("I2C cihazi bulundu: 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+      nDevices++;
+    } else if (error == 4) {
+      Serial.print("Bilinmeyen hata 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+    }
+  }
+  if (nDevices == 0)
+    Serial.println("Hicbir I2C cihazi bulunamadi!\n");
+  else
+    Serial.println("I2C Taramasi Tamamlandi.\n");
+
+  // Init LCD
+  InitLCD();
+  Greetings();
+
+  writeFRQToLcd(FRQ);
+  
+  old_KeyVal = 1; //initial keypad read
+  validFRQ = Calculate_Frequency(FRQ); // start with default frequency //TODO: Change this to last frequemcy set
+
+  scrTimer = TimeoutValue;  
+
+//  if (pgm_read_byte (32700) != 188)
+//    while (1) 
+//      Alert_Tone(ERR_tone);
+
+  // Start WebUI and WiFi at boot
+  initWebUI();
+
+  PrintMenu();
+}
+
+
+void loop() {
+
+  //setRadioPower(); //Check power switch and set radio power mode on or off
+  
+  //if (scrMODE==scrNORMAL) writeFRQToLcd(FRQ); //TODO: We should update the display only on proper display changes.. But this works...
+
+  if (scrMODE==scrNORMAL)
+  {
+    // Heartbeat LED
+    digitalWrite(LED_BUILTIN, (millis() / 500) % 2);
+  }
+
+
+  //Output data to Keyboard... First first bits for keyboard, next bits for backlight and leds... 
+  Wire.beginTransmission(PCF8574_KEYB_LED);
+  Led_Status = 240;
+  if ((CHANNEL_BUSY==0) or (SQL_MODE==SQL_OFF)) Led_Status = Led_Status - green_led; //we are receivig
+  if (CHANNEL_BUSY==0) APRS_Counter = 0; //If channel is busy, dont transmit APRS, wait the musy to finish and restart counter
+  if (TRX_MODE == TX) Led_Status = Led_Status - red_led;  //We are transmitting
+  if (pttToggler) send_packet(_STATUS,(freqLimits.aprs_25*25)); //TODO: what if UHF
+
+  //Led_Status = Led_Status - yellow_led;
+  //Led_Status = Led_Status - red_led;
+  if (APRS_Counter < 2000) Led_Status = Led_Status - backlight;
+  Wire.write(Led_Status); 
+  Wire.endTransmission();
+
+  CHANNEL_BUSY = digitalRead(SQL_ACTIVE);  
+  if (CHANNEL_BUSY == 0) digitalWrite(MUTE_PIN_1, LOW);
+    else if (SQL_MODE == SQL_ON) digitalWrite(MUTE_PIN_1, HIGH); 
+      else digitalWrite(MUTE_PIN_1, LOW);
+
+
+  /*
+  TOT Function
+  Call Method.
+  */
+  TRX_MODE =  TXTimeOutTimer(digitalRead(PTT_INPUT_PIN)); //read PTT state
+  if (TOT_FLAG == 1) {
+    writeToLcd("TOTWARN ");
+    delay(10);
+    if (TOT_WARN_STATE == 1) Alert_Tone(ERR_tone);
+    TOT_WARN_STATE = 0;
+  }
+
+
+//TRX_MODE = digitalRead(PTT_INPUT_PIN); //read PTT state
+//  if (pttToggler && TRX_MODE == RX) TRX_MODE = TX; //if pttToggler set from serial, then mode is transmission
+  if (TRX_MODE != LST_MODE) {
+    LST_MODE = TRX_MODE;
+    write_FRQ(current_ch.frequency); //Update frequency on every state change
+    SetTone(current_ch.tone_enabled); //Change Tone Generation State ONLY when state changes
+    if (TRX_MODE == TX ) digitalWrite(PTT_OUTPUT_PIN,HIGH); // now start transmitting
+      else digitalWrite(PTT_OUTPUT_PIN, LOW);
+  }
+
+  //if (subMENU == menuRPT) writeToLcd(cstr);
+
+ //check APRS timer timeout, and send APRS message if timeout reached
+ //TODO: Convert timeout to seconds instead of loop counter
+ // APRS_Counter += 1;
+ //if (APRS_Counter % 1000) Serialprint("%d\r\n",APRS_Counter);
+ //uint32_t APR_tmt = APRS_Timeout * 60 * 150;
+ // if (((APRS_Counter/150) >= (APRS_Timeout)) && (APRS_Timeout > 0)) {
+ //    send_packet(_FIXPOS_STATUS,(freqLimits.aprs_25*25)); //For APRS terrestrial  //TODO: UHF ?
+ //    send_packet(_FIXPOS_STATUS,(freqLimits.iss_25*25));  //For ISS               //TODO: UHF ?
+ //    APRS_Counter = 0;
+ // }
+
+  //this is our interrupt pin... Move this to a proper interrupt rutine
+  KeyVal = digitalRead(KeypadIntPin);
+
+
+  //Long press on a key detection...
+  if ((KeyVal == old_KeyVal) & (KeyVal ==  0) & (scrTimer>0)) scrTimer -= 1; //Keypressed and there are counts to go
+    else if (KeyVal==1) {
+     if (scrTimer==0) { //key released and timeout occured
+//       writeToLcd("SELECT   ");
+//       delay(500); //TODO do not use DELAY, change to a timer
+       if (pressedKEY=='B') { writeToLcd("TONE     "); subMENU = menuTONE; delay(1000);write_TONEtoLCD(current_ch.tone_pos); old_ctcss_tone_pos = current_ch.tone_pos;}
+       if (pressedKEY=='S') { writeToLcd("SQL      "); subMENU = menuSQL;  }
+       if (pressedKEY=='O') { writeToLcd("SCAN     "); delay(1000); startScan(); } //subMENU = menuSCAN; }
+        if (pressedKEY=='M') { writeToLcd("MENU     "); subMENU = menuMENU; }
+       delay(500); //TODO do not use DELAY, change to a timer
+       scrTimer = TimeoutValue; //Restart the timer
+       numChar = 0; //if we were entering frq from keyboard
+       if (pressedKEY != '#') scrMODE = scrMENU;    
+     }//scrTimer
+    }//Keyval==0
+
+  
+  if (KeyVal != old_KeyVal) { 
+    if (KeyVal == 0) {
+        Alert_Tone(OK_tone);  
+        APRS_Counter = 0; //if a key is pressed, restart the APRS timer
+        scrTimer = TimeoutValue; //Restart the timer
+        int satir = readRow();
+        int sutun = readColumn();
+        pressedKEY = keymap[sutun][satir]; //LOOKUP for the pressedKEY
+    
+    // KEYPAD LOGGING
+    Serialprint("[KEYPAD] Satir: %d, Sutun: %d -> Basilan Tus: '%c'\r\n", satir, sutun, pressedKEY);
+
+    if (pressedKEY != 'X') {
+
+    if (scrMODE == scrMENU)  {
+      // Serialprint("srcmode src menu \n\r  ");
+        // Serialprint("src menu not X pressedKey:%d \n\r  ", pressedKEY);
+        switch (pressedKEY) {
+          case 'U':
+            if ( subMENU == menuRPT)  { current_ch.shift += 25; write_SHIFTtoLCD(current_ch.shift); }  //TODO: check overflows... + or -
+            if ( subMENU == menuTONE) { current_ch.tone_pos += 1; if (current_ch.tone_pos>=19) current_ch.tone_pos = 19 ; write_TONEtoLCD(current_ch.tone_pos); EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, current_ch);}
+            break;
+          case 'D':
+            if ( subMENU == menuRPT)  {current_ch.shift -= 25; write_SHIFTtoLCD(current_ch.shift); }
+            if ( subMENU == menuTONE) { current_ch.tone_pos -= 1;  if (current_ch.tone_pos<=0) current_ch.tone_pos = 0 ; write_TONEtoLCD(current_ch.tone_pos); EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, current_ch);}
+            break;
+          case '#': //means CANCEL
+            if (subMENU == menuRPT)  current_ch.shift = old_frqSHIFT;
+            if (subMENU == menuTONE) current_ch.tone_pos = old_ctcss_tone_pos;
+            //testing the lock reported by TA2GY .. memory recall after shift setup locks device
+            numChar = 0;
+            // Serialprint("set to X pressedKey:%d \n\r  ", pressedKEY);
+            pressedKEY = 'X';
+            scrMODE = scrNORMAL; //we are in menu or submenus.. return to normal display
+            subMENU = menuNONE;
+          break; // '#'
+          case '*': //means OK
+            EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, current_ch);
+            //if ( subMENU == menuRPT)  write_SHIFTtoEE(frqSHIFT);
+            //if ( subMENU == menuTONE) write_TONEtoEE(ctcss_tone_pos);
+            //testing the lock reported by TA2GY .. memory recall after shift setup locks device
+            numChar = 0;
+            // Serialprint("set to X * pressedKey:%d \n\r  ", pressedKEY);
+            pressedKEY = 'X';
+            scrMODE = scrNORMAL; //we are in menu or submenus.. return to normal display
+            subMENU = menuNONE;
+          break; // '*'
+          default:
+          break; 
+        }//switch
+    }//scrMENU
+    
+  /* -----------------------------------------------------
+   SCREEN MODE NORMAL.. WE READ FREQUENCY AND OTHER KEYS 
+   ----------------------------------------------------- */
+    if (scrMODE == scrNORMAL) { //mode NORMAL and key released
+      // Serialprint("src normal pressedKey:%d \n\r  ", pressedKEY);
+      if (pressedKEY != 'X') {
+        // Check for the COMMAND keys first
+        switch (pressedKEY) {
+          case 'R':
+            if (current_ch.shift_dir == noSHIFT) { 
+              current_ch.shift_dir = plusSHIFT;
+            } else if (current_ch.shift_dir == plusSHIFT) {
+              current_ch.shift_dir = minusSHIFT;
+            } else { 
+              current_ch.shift_dir = noSHIFT;
+            }
+            EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, current_ch);
+            EEPROM.commit();
+            write_FRQ(current_ch.frequency);
+          break; //'R'
+          case 'B':
+            if (current_ch.tone_enabled == CTCSS_OFF) {
+              current_ch.tone_enabled = CTCSS_ON;
+            } else {
+              current_ch.tone_enabled = CTCSS_OFF;
+            }
+            EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, current_ch);    
+            EEPROM.commit();
+            SetTone(current_ch.tone_enabled); //Change Tone Generation State
+            write_FRQ(current_ch.frequency);
+          break; // 'B'
+          case 'S':
+            if (SQL_MODE == SQL_OFF) {
+              SQL_MODE = SQL_ON;
+            } else {
+              SQL_MODE = SQL_OFF;
+            }
+            write_FRQ(current_ch.frequency);
+          break; //'S'
+          case 'O':
+             if (RF_POWER_STATE == HIGH_POWER) {
+                RF_POWER_STATE = LOW_POWER;
+             } else {
+                RF_POWER_STATE = HIGH_POWER;
+             }
+//             SetRFPower(RF_POWER_STATE);           
+             SetRFPower();           
+             write_FRQ(current_ch.frequency);
+          break; //'O'
+          case 'U':
+            if (op_mode == MODE_VFO) {
+                numberToFrequency(current_ch.frequency+freq_step,FRQ);
+                Calculate_Frequency(FRQ);  
+                write_FRQ(current_ch.frequency); 
+                EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, current_ch);
+                EEPROM.commit();
+            } else {
+                current_memory_channel++;
+                if (current_memory_channel > 50) current_memory_channel = 1;
+                char chStr[3];
+                sprintf(chStr, "%02d", current_memory_channel);
+                GetMemoryChannel(chStr);
+                EEPROM.write(EEPROM_CURR_MEMCH_ADDR, current_memory_channel);
+                EEPROM.commit();
+                write_FRQ(current_ch.frequency); // For now just show freq, later show name
+            }
+          break; // 'U' 
+          case 'D':
+            if (op_mode == MODE_VFO) {
+                numberToFrequency(current_ch.frequency-freq_step,FRQ);
+                Calculate_Frequency(FRQ);  
+                write_FRQ(current_ch.frequency);           
+                EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, current_ch);
+                EEPROM.commit();
+            } else {
+                current_memory_channel--;
+                if (current_memory_channel < 1) current_memory_channel = 50;
+                char chStr[3];
+                sprintf(chStr, "%02d", current_memory_channel);
+                GetMemoryChannel(chStr);
+                EEPROM.write(EEPROM_CURR_MEMCH_ADDR, current_memory_channel);
+                EEPROM.commit();
+                write_FRQ(current_ch.frequency);
+            }
+          break; // 'D'
+          case 'M': //Reverse was originally here, but 'R' does it too.
+            // Toggle mode VFO/MR
+            if (op_mode == MODE_VFO) {
+                op_mode = MODE_MR;
+                Serialprint("[MODE] Hafiza (MR) Moduna Gecildi\r\n");
+                char chStr[3];
+                sprintf(chStr, "%02d", current_memory_channel);
+                GetMemoryChannel(chStr); 
+            } else {
+                op_mode = MODE_VFO;
+                Serialprint("[MODE] Serbest (VFO) Moduna Gecildi\r\n");
+                strcpy(FRQ,FRQ_old);
+                validFRQ = Calculate_Frequency(FRQ);
+            }
+            numChar = 0;
+            EEPROM.write(EEPROM_OP_MODE_ADDR, op_mode);
+            EEPROM.commit();
+            write_FRQ(current_ch.frequency);
+          break; // 'M'
+          case 'C':
+            //VNA Vector Network analizor Subroutines
+            TRX_MODE = TX; //needed for PLL locking to TX frequrency
+            minSWR = 9999;
+            lowestFRQ=0;
+            highestFRQ=0;           
+            //TODO: Store old values of variables (FRQ, SHIFT, etc)
+            //TODO: Put transmitter on low power before operation
+            //TODO: If any key pressed cancel VNA operation
+            strcpy(FRQ_old,FRQ); //store old frequency for recall
+            current_ch.shift_dir = noSHIFT; //get into SIMPLEX mode for caculations
+//            SetRFPower(LOW_POWER);
+            SetRFPower();
+            long min_vna_freq;
+            long max_vna_freq;
+            int  stp_vna_freq;
+            if (radio_type==0)
+            {
+              min_vna_freq = freqLimits.vna_min_25 * 25;
+              max_vna_freq = freqLimits.vna_max_25 * 25;
+              stp_vna_freq = 10;
+            }
+            else //TODO: different defaults for VHF and UHF
+            {
+              min_vna_freq = 43000;
+              max_vna_freq = 45000;              
+              stp_vna_freq = 10;
+            }
+            digitalWrite(PTT_OUTPUT_PIN,HIGH);
+            Serialprint("\r\n#VNA#\t%l\t%l\r\n",min_vna_freq,max_vna_freq); //START
+            for (long vna_freq=min_vna_freq; vna_freq < max_vna_freq; vna_freq += stp_vna_freq)
+              {
+                numberToFrequency(vna_freq,FRQ);
+                validFRQ = Calculate_Frequency(FRQ);
+                write_FRQ(current_ch.frequency);
+                writeFRQToLcd(FRQ);
+                Serialprint(">%d\t",vna_freq);
+                delay(100);
+                //digitalWrite(PTT_OUTPUT_PIN,HIGH);
+                //delay(50);
+                readRfPower(); //TODO: Move under a menu item
+                //delay(25);
+                //digitalWrite(PTT_OUTPUT_PIN,LOW);
+
+                if (readColumn() != 0) break; //a key is pressed
+              }
+              digitalWrite(PTT_OUTPUT_PIN,LOW);
+              Serialprint("@VNA@\t%d\t%d\r\n",min_vna_freq,max_vna_freq); //END
+              //SetRFPower(RF_POWER_STATE);
+              SetRFPower();
+              TRX_MODE = RX; //PLL should lock to RX
+              //strcpy(FRQ,FRQ_old);
+              numberToFrequency((highestFRQ+lowestFRQ)/2,FRQ);
+              validFRQ = Calculate_Frequency(FRQ);
+              write_FRQ(current_ch.frequency);            
+              writeFRQToLcd(FRQ);
+              PrintMenu(); //print menu for user selection  
+          break; // 'C'
+          case '#':
+            if (numChar == 2) {
+                StoreFrequency(FRQ,FRQ_old); 
+                numChar = 0;
+                write_FRQ(current_ch.frequency);
+            }
+            else if (numChar == 4) {
+                StoreSpecialFrequency(FRQ,FRQ_old);
+                numChar = 0;
+                write_FRQ(current_ch.frequency);
+            }
+            else {
+                strcpy(FRQ,FRQ_old);
+                validFRQ = Calculate_Frequency(FRQ);
+                numChar = 0;
+                write_FRQ(current_ch.frequency);
+            }
+          break; // '#'
+          case '*':
+            if (numChar == 2) GetMemoryChannel(FRQ); // User wanted to retrieve the memory channel from EEPRM
+            else strcpy(FRQ,FRQ_old); // Otherwise user wanted to cancel the ongoing operation.. return to previous (old) frequency
+            validFRQ = Calculate_Frequency(FRQ);
+            numChar = 0;
+            write_FRQ(current_ch.frequency);
+          break; // '*'
+         
+          default:  
+            /* ------------------    FRQ INPUT ------------ */
+            // Serialprint("Before If FRQ :%s numChar:%d pressedKey:%d \n\r  ",FRQ,numChar,pressedKEY);
+            if (numChar <= 6) { //Not a command Key so print it into frequency
+              if (numChar == 0) {
+              //  strcpy(FRQ,"        "); //just pressed keys, so clear the screen
+              FRQ[0]=' ';
+              FRQ[1]=' ';
+              FRQ[2]=' ';
+              FRQ[3]=' ';
+              FRQ[4]=' ';
+              FRQ[5]=' ';
+              FRQ[6]=' ';
+              FRQ[7]=' ';
+              }
+              
+              FRQ[numChar] = pressedKEY;
+              numChar = numChar + 1;
+              if (numChar == 3) { //place a dot for the 4th character
+                FRQ[3] = '.';
+                numChar = numChar + 1;
+              } //numchar==3
+              
+              writeFRQToLcd(FRQ); // SHOW PARTIAL INPUT ON SCREEN
+              
+              if (numChar == 7) { //input finished 
+                validFRQ = Calculate_Frequency(FRQ);
+                numChar = 0;
+                write_FRQ(current_ch.frequency);
+                if (validFRQ) {
+                  current_ch.shift_dir = noSHIFT; // Reset shift to Simplex when a new frequency is entered manually
+                  EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, current_ch); // Save the new simplex mode
+                  strcpy(FRQ_old,FRQ);
+                } else {
+                  strcpy(FRQ,FRQ_old); //"   .   ";
+                  numChar = 0;
+                  validFRQ = Calculate_Frequency(FRQ);
+                  write_FRQ(current_ch.frequency);
+                  //sound audible error here
+                }
+              } // numChar==7
+            }//numchar<6
+            
+          break; 
+        }//switch
+      }//pressedKEY != 'X'
+    }//scrMODE=scrNORMAL
+    } // pressedKEY != 'X' GLOBAL
+    
+    } // KeyVal == 0
+    
+    //Put 8574_ into READ mode by setting ports high
+    Wire.beginTransmission(0x20);
+    Wire.write(255); 
+    Wire.endTransmission();
+    
+    //Toggle interupt PIN state holder
+    old_KeyVal = KeyVal;
+   } //KeyVal!=old_keyval
+
+if (commandComplete) {
+    //TODO: convert to case/switch
+    if (commandString.charAt(0) == '\n') PrintMenu();
+    //if (commandString.charAt(0) == 'Y') commandYardim(commandString.charAt(2));
+    if (commandString.charAt(0) == 'C') commandRadioType(commandString.charAt(2));
+    if (commandString.charAt(0) == 'A') commandStartupMSG();
+    if (commandString.charAt(0) == 'T') commandAPRSTimeout();
+    if (commandString.charAt(0) == 'M') commandAPRSMessage();    
+    if (commandString.charAt(0) == 'S') commandAPRSmycall();    
+    if (commandString.charAt(0) == 'H') commandMemoryDump();
+    if (commandString.charAt(0) == 'K') commandDumpConfig();
+    if (commandString.charAt(0) == 'C') commandMemoryChannel();
+    if (commandString.charAt(0) == 'P') commandTogglePTT();
+    if (commandString.charAt(0) == 'G') getGPSData();
+    if (commandString.charAt(0) == 'R') getEEPROMData();
+    if (commandString.charAt(0) == 'N') startScan();
+    if (commandString.charAt(0) == 'X') softResetDevice();
+    if (commandString.charAt(0) == 'f') commandFrequencyLowerLimit();
+    if (commandString.charAt(0) == 'F') commandFrequencyUpperLimit();
+    if (commandString.charAt(0) == 'q') commandScanLowerLimit();
+    if (commandString.charAt(0) == 'Q') commandScanUpperLimit();
+    if (commandString.charAt(0) == 'B') commandAprsFrequency();
+    if (commandString.charAt(0) == 'I') commandISSFrequency();
+    if (commandString.charAt(0) == 'W') { initWebUI(); }
+    if (commandString.charAt(0) == 'J') { 
+        freq_step = 25; Serialprint("Adim 25 KHz (Donanimsal Sabit)\r\n");
+    }
+    
+//   Serial.println("Gecersiz bir komut... tekrar deneyiniz...");
+    commandString = "";
+    commandComplete = false;
+    PrintMenu();
+    //Serialprint("\r\nSeciminiz>");
+    //EEPROM.get(EEPROM_CURRCHNL_BLCKSTART, current_ch);
+  }
+
+//13:49:03$ fm TA7W-9 to TAMSAT-0 via ARISS-1 UI  PID=F0!3955.50N>3250.22E/ TAMSAT KIT - APRS TEST
+//  send_packet(_STATUS);  
+//  delay(tx_delay);
+//  randomize(tx_delay, 10, 5000);
+//  randomize(str_len, 10, 420);
+  handleWebUI();
+  
+  #ifdef RESETWATCHDOG
+	//wdt_reset();
+  #endif
+} //loop
+
+void StreamPrint_progmem(Print &out,PGM_P format,...)
+{
+  #ifdef SERIALMENU 
+  char formatString[128], *ptr;
+  strncpy_P( formatString, format, sizeof(formatString) ); // copy in from program mem
+  // null terminate - leave last char since we might need it in worst case for result's \0
+  formatString[ sizeof(formatString)-2 ]='\0'; 
+  ptr=&formatString[ strlen(formatString)+1 ]; // our result buffer...
+  va_list args;
+  va_start (args,format);
+  vsnprintf(ptr, sizeof(formatString)-1-strlen(formatString), formatString, args );
+  va_end (args);
+  formatString[ sizeof(formatString)-1 ]='\0'; 
+  out.print(ptr);
+  
+  webLogBuffer += ptr;
+  if(webLogBuffer.length() > 2000) {
+    webLogBuffer = webLogBuffer.substring(webLogBuffer.length() - 2000);
+  }
+  #endif
+}
+
+
+void serialEvent() {
+  //Serialprint(".");
+  cli();
+  while (Serial.available()) {
+    //char inChar = UDR0; //
+    char inChar = (char)Serial.read();
+    //Serialprint(inChar); //local echo
+    commandString += inChar;
+    if (inChar == '\n') {
+      commandComplete = true;
+    }
+  }
+  sei();
+}
+
+/*
+ * seri olarak okunan byte lari 0x09 veya 0x04 e kadar olanini geri dondurmek icin
+ */
+/*
+void readParam(char *szParam, int iMaxLen) {
+  uint8_t c;
+  int iSize;
+  unsigned long iMilliTimeout = millis() + 2000; 
+
+  for (iSize=0; iSize<iMaxLen; iSize++) szParam[iSize] = 0x00; 
+  iSize = 0;   
+
+  while (millis() < iMilliTimeout) {
+
+    if (Serial.available()) {
+      c = Serial.read();
+
+      if (c == 0x09 || c == 0x04) {
+        Serialprint("\r\n");
+        return;
+      }
+      if (iSize < iMaxLen) {
+        szParam[iSize] = c;
+        iSize++;
+      }
+    }
+  }
+
+}
+
+bool getFromSerialport() {
+  char szParam[10]; //maximum length of a variable value
+  unsigned long iMilliTimeout = millis() + 10000;    
+  while (millis() < iMilliTimeout) {
+  while (!Serial.available()) { } 
+    if (Serial.read() == 0x01) {   //The stream starts with a 0x01
+      readParam(szParam, sizeof(szParam));
+      if (strcmp(szParam, VERSIYON) != 0) {
+        DEBUG_PORT.println(szParam);
+          DEBUG_PORT.println(F("E99 Versiyonlar uyumsuz..."));
+        return false;
+      }
+    
+      readParam(szParam, sizeof(Ayarlar.APRS_CagriIsareti));    //CagriIsareti
+      strcpy(Ayarlar.APRS_CagriIsareti, szParam);
+      readParam(szParam, 1);    //CagriIsareti SSID
+      Ayarlar.APRS_CagriIsaretiSSID = szParam[0];
+
+
+      readParam(szParam, sizeof(Ayarlar.APRS_Destination));    //Destination
+      strcpy(Ayarlar.APRS_Destination, szParam);
+      readParam(szParam, 1);    //SSID
+      Ayarlar.APRS_DestinationSSID = szParam[0];
+
+      readParam(szParam, sizeof(Ayarlar.APRS_Path1));    //Path1
+      strcpy(Ayarlar.APRS_Path1, szParam);
+      readParam(szParam, 1);    //SSID
+      Ayarlar.APRS_Path1SSID = szParam[0];
+
+      readParam(szParam, sizeof(Ayarlar.APRS_Path2));    //Path2
+      strcpy(Ayarlar.APRS_Path2, szParam);
+      readParam(szParam, 1);    //SSID
+      Ayarlar.APRS_Path2SSID = szParam[0];
+
+      //Symbol/Tab
+      readParam(szParam, 1);
+      Ayarlar.APRS_Sembolu = szParam[0];
+      readParam(szParam, 1);
+      Ayarlar.APRS_SembolTabi = szParam[0];
+
+      //BeaconTipi
+      readParam(szParam, sizeof(szParam));
+      Ayarlar.APRS_BeaconTipi = atoi(szParam);
+
+      //Beacon Suresi
+      readParam(szParam, sizeof(szParam));
+      Ayarlar.APRS_BeaconSuresi = atoi(szParam);
+
+      //GPS Seri Hizi
+      readParam(szParam, sizeof(szParam));
+      Ayarlar.APRS_GPSSeriHizi = atoi(szParam);
+
+      //Status Message
+      readParam(szParam, sizeof(szParam));
+      strcpy(Ayarlar.APRS_Message, szParam);
+
+      //GPS Var/Yok
+      readParam(szParam, sizeof(szParam));
+      Ayarlar.gps_varyok = atoi(szParam);    
+
+
+
+      unsigned int iCheckSum = 0;
+      for (int i=0; i<7; i++) {
+        iCheckSum += Ayarlar.APRS_CagriIsareti[i];
+      }
+      Ayarlar.CheckSum = iCheckSum;
+      return true;    //OKuma tamamlandi
+    } // read 0x01
+  } //millis
+  return false;
+
+}
+*/
+
+
+/*
+ * 
+ */
+
+
+
+
+
+
+/*
+ * This function will calculate CRC-16 CCITT for the FCS (Frame Check Sequence)
+ * as required for the HDLC frame validity check.
+ * 
+ * Using 0x1021 as polynomial generator. The CRC registers are initialized with
+ * 0xFFFF
+ */
+
+
+
+
+
+
+
+
+/*
+ * This function will send one byte input and convert it
+ * into AFSK signal one bit at a time LSB first.
+ * 
+ * The encode which used is NRZI (Non Return to Zero, Inverted)
+ * bit 1 : transmitted as no change in tone
+ * bit 0 : transmitted as change in tone
+ */
+
+
+
+
+
+
+/*
+ * In this preliminary test, a packet is consists of FLAG(s) and PAYLOAD(s).
+ * Standard APRS FLAG is 0x7e character sent over and over again as a packet
+ * delimiter. In this example, 100 flags is used as the preamble and 3 flags as
+ * the postamble.
+ */
+
+
+/*
+ * Function to randomized the value of a variable with defined low and hi limit value.
+ * Used to create random AFSK pulse length.
+ */
+ /*
+void randomize(unsigned int &var, unsigned int low, unsigned int high)
+{
+  var = random(low, high);
+}
+*/
+
+void getGPSData()
+{
+  TinyGPS gps;
+  SoftwareSerial ss(A1, A3);
+  ss.begin(9600);
+  float flat, flon;
+  unsigned long age = 0;
+  //unsigned long age, date, time, chars = 0;
+  //unsigned short sentences = 0, failed = 0;
+  
+  unsigned long start = millis();
+  do 
+  {
+    while (ss.available())
+      gps.encode(ss.read());
+  } while (millis() - start < 1000); //read within 1 second
+
+  //Serialprint(gps.satellites());
+  gps.f_get_position(&flat, &flon, &age);
+/*
+  Serialprint(flat);
+  Serialprint(" ");
+  Serialprint(flon);
+  Serialprint(" ");
+  Serialprint(age);
+  Serialprint(" ");
+  Serialprint(gps.f_altitude());
+  Serialprint(" ");
+  Serialprint(gps.f_course());
+  Serialprint(" ");
+  Serialprint(gps.f_speed_kmph());
+  Serialprint("\r\n");
+*/
+      
+}
+
+void(* resetFunc) (void) = 0;
+void softResetDevice()
+{
+  rp2040.reboot();
+}
+//LCD FUNCTIONS
+
+
+// Initialize the LCD
+
+
+/* Physically send out the given data */
+
+
+
+
+
+
+/* Scrolls a text over the LCD */
+
+
+
+//Print Greeting messages to LCD
+
+
+
+
+//HELPER FUNCTIONS
+//MC145158 programming routines
+//R_counter=512
+//N_counter=100
+//A_counter=0
+
+void send_SPIBit(int Counter, uint8_t length) {
+  for (int i=length-1;i>=0;i--) {
+    uint8_t data=bitRead(Counter,i);
+    if (data==1) {
+     digitalWrite(pll_data_pin, HIGH);    // Load 1 on DATA
+    } else {
+     digitalWrite(pll_data_pin, LOW);    // Load 1 on DATA
+    }
+    delay(1);
+    digitalWrite(pll_clk_pin,HIGH);    // Bring pin CLOCK high
+    delay(1);
+    digitalWrite(pll_clk_pin,LOW);    // Then back low
+    
+    /* For backlight Flickering Issue #44 */
+    Wire.beginTransmission(0x21);
+    Wire.write((uint8_t)224);
+    Wire.endTransmission();
+  }
+}
+
+void send_SPIEnable() {
+  digitalWrite(pll_ena_pin, HIGH);   // Bring ENABLE high
+  delay(1);
+  digitalWrite(pll_ena_pin, LOW);    // Then back low  
+}
+
+void SetTone(int toneSTATE) {
+  noTone(ALERT_PIN);
+  if (TRX_MODE == RX) {
+      analogWrite(MIC_PIN, 0);
+      pinMode(MIC_PIN, OUTPUT);
+      digitalWrite(MIC_PIN, LOW); // Mute mic during RX to prevent muffled speaker audio
+  } else {
+      // TRX_MODE == TX
+      if (toneSTATE == CTCSS_ON) { 
+          analogWriteFreq(ctcss_tone_list[current_ch.tone_pos]);
+          analogWrite(MIC_PIN, 5); // %2 duty cycle to prevent drowning mic audio
+      } else {
+          analogWrite(MIC_PIN, 0);
+          pinMode(MIC_PIN, INPUT); // Let mic float freely during TX for perfect voice
+      }
+  }
+}
+
+
+
+
+
+
+

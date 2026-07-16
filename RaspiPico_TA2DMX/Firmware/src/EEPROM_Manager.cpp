@@ -1,0 +1,172 @@
+#include "main.h"
+
+void eeread_nbytes(String *dst, uint8_t sz, uint16_t addr)
+{
+  String edata = "";  
+  for (uint8_t cn=0;cn<sz;cn++) edata.concat((char)EEPROM.read(addr+cn));
+  *dst = edata;
+}
+
+void eeprom_readAPRS()
+{
+  //APRS Settings
+  eeread_nbytes(&APRS_Message,28,20);
+  eeread_nbytes(&mycall,6,60);
+  APRS_Timeout = EEPROM.read(66);
+  eeread_nbytes(&lat,8,67);
+  eeread_nbytes(&lon,8,75);
+}
+
+void eewrite_nbytes(String dst, uint8_t sz, uint16_t addr)
+{
+  while (sz--) EEPROM.write(addr+sz,dst[sz]);  //Serialprint("%d %d %d\r\n",sz,addr+sz,dst[sz]);
+}
+
+void eeprom_writeAPRS()
+{
+    //APRS Settings
+    eewrite_nbytes(APRS_Message,28,20);
+    eewrite_nbytes(mycall,6,60);
+    EEPROM.write(66,APRS_Timeout); //Aprs timeout in minutes
+    eewrite_nbytes(lat,8,67);
+    eewrite_nbytes(lon,8,75);
+    Alert_Tone(OK_tone);
+}
+
+void initialize_eeprom() {  
+    EEPROM.write(0, 128); // make eeprom initialized (128 = OK, 129 = Force Reset)
+    EEPROM.write(1, SW_MAJOR);   //SW Version
+    EEPROM.write(2, SW_MINOR);   //
+    eewrite_nbytes(APRS_DEFAULT_MYCALL,6,3);
+    eewrite_nbytes(DEFAULT_STARTUP_MSG,6,9);
+    EEPROM.write(17,radio_type); // Program device as VHF=0 or UHF=1
+    APRS_Message = APRS_DEFAULT_MESSAGE;
+    mycall = APRS_DEFAULT_MYCALL;  
+    APRS_Timeout = 0;
+    lat = APRS_DEFAULT_LAT;
+    lon = APRS_DEFAULT_LON;
+    eeprom_writeAPRS();
+    //for (int location=18;location < 300;location++) EEPROM.write(location,0); // Zeroise the rest of the memory
+    channel_t default_channel;
+    if (radio_type == 0)
+    { 
+      default_channel.frequency = 145500; // Simplex 145.500 default
+      default_channel.shift = 600;
+      default_channel.shift_dir = 0; // noSHIFT
+    }
+    else
+    {
+      default_channel.shift = 7600;
+      default_channel.frequency = 433500;
+    }
+    default_channel.shift_dir = noSHIFT;
+    default_channel.tone_pos = 8;
+    default_channel.tone_enabled = 0; // CTCSS_OFF Default!
+    EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, default_channel);
+    freqLimits_t default_limits;
+    EEPROM.put(EEPROM_SPECIALFRQ_BLCKSTART,default_limits);
+    freqLimits = default_limits;
+
+
+    // TOT EEPROM INIT
+     EEPROM.put(EEPROM_TOT, tot_values);
+
+
+    memorych_t memch;
+    memch.frequency25 = 5820; //145500 / 25
+    memch.shift25      = 24;    //600 / 25
+    memch.tone_position= 8;     //88.5
+    memch.SSTP         = 1;     // No shift, tone off. power low
+    memch.ChannelName[0]  = 'K';
+    memch.ChannelName[1]  = 'A';
+    memch.ChannelName[2]  = 'N';
+    memch.ChannelName[3]  = 'A';
+    memch.ChannelName[4]  = 'L';
+    memch.ChannelName[5]  = ' ';
+    memch.ChannelName[6]  = ' ';
+
+
+    memset(memch.ChannelName, 0x00, 7);
+    for (int ch=1; ch<=50; ch++)
+        EEPROM.put(EEPROM_MEMDATA_BLCKSTART + ch * EEPROM_CHNNL_SIZE, memch);
+    EEPROM.commit();
+}
+
+void StoreFrequency(char mCHNL[9], char mFRQ[9]) {
+    uint8_t ChannelNumber = ((mCHNL[0] - 48) * 10) + (mCHNL[1] - 48);
+    uint16_t ChannelLocation = EEPROM_MEMDATA_BLCKSTART + ChannelNumber * EEPROM_CHNNL_SIZE;
+    Calculate_Frequency(mFRQ); 
+    if (ChannelNumber > 90 ) { Alert_Tone(ERR_tone); return;}
+    
+    memorych_t memch;
+    memch.frequency25 = (uint16_t)(current_ch.frequency / 25);
+    memch.shift25 = (uint8_t)(current_ch.shift / 25);
+    memch.tone_position= current_ch.tone_pos; 
+    memch.SSTP =  (current_ch.shift_dir + 1)  + (current_ch.tone_enabled * 4);//TODO: Power is missing + ( power * 8);
+    EEPROM.put(ChannelLocation, memch); 
+}
+
+void GetMemoryChannel(char mFRQ[9]) {
+    uint8_t ChannelNumber = ((mFRQ[0] - 48) * 10) + (mFRQ[1] - 48);
+    uint16_t ChannelLocation = EEPROM_MEMDATA_BLCKSTART + ChannelNumber * EEPROM_CHNNL_SIZE;
+    if (ChannelNumber > 90) { Alert_Tone(ERR_tone); return;};
+    memorych_t l_memorych;
+    EEPROM.get(ChannelLocation, l_memorych);
+    current_ch.frequency = l_memorych.frequency25 * 25;
+    current_ch.shift     = l_memorych.shift25 * 25;
+    current_ch.tone_pos  = l_memorych.tone_position;
+    current_ch.shift_dir = ((l_memorych.SSTP) & 0x03) - 1; //First 2 bits -1
+    current_ch.tone_enabled= ((l_memorych.SSTP) & 0x04) >> 2;  //3rd bit is tone_enabled
+                                                          //TODO read power as well
+    if (l_memorych.ChannelName[0] != 0xFF && l_memorych.ChannelName[0] != 0x00 && l_memorych.ChannelName[0] != ' ') {
+        memset(FRQ, ' ', 8);
+        FRQ[8] = 0;
+        for (int i=0; i<7; i++) {
+            if (l_memorych.ChannelName[i] == 0xFF || l_memorych.ChannelName[i] == 0x00) break;
+            FRQ[i] = l_memorych.ChannelName[i];
+        }
+    } else {
+        strcpy(FRQ, "NULL    ");
+        FRQ[8] = 0;
+    }
+ }
+
+void GetPrintMemoryChannelInfo(int8_t channel_number, boolean dbg) {
+      memorych_t l_memorych;
+      uint16_t ChannelLocation = EEPROM_MEMDATA_BLCKSTART + channel_number * EEPROM_CHNNL_SIZE;
+      EEPROM.get(ChannelLocation, l_memorych);
+      //numberToFrequency(freq, FRQ);
+      if (dbg) 
+      {
+        Serialprint("{c:%d,f:%d,s:%d,t:%d}",channel_number,l_memorych.frequency25,l_memorych.shift25,l_memorych.tone_position); //TODO: add name
+      }
+
+}
+
+void StoreSpecialFrequency(char mCHNL[9], char mFRQ[9])
+{
+    uint16_t ChannelNumber = (((mCHNL[0] - 48) * 100) + ((mCHNL[1] - 48) * 10) + (mCHNL[2] - 48));
+    if (Calculate_Frequency(mFRQ))
+    {
+      if (ChannelNumber == 101) { freqLimits.trx_min_25 = current_ch.frequency/25; } //TRX Lower Limit
+      if (ChannelNumber == 151) { freqLimits.trx_min_25 = DEFAULT_VHF_MINIMUM_FREQ; }
+      if (ChannelNumber == 102) { freqLimits.trx_max_25 = current_ch.frequency/25; } //TRX Upper Limit
+      if (ChannelNumber == 152) { freqLimits.trx_max_25 = DEFAULT_VHF_MAXIMUM_FREQ; }
+      if (ChannelNumber == 201) { freqLimits.scn_min_25 = current_ch.frequency/25; } //Scan lower Limit
+      if (ChannelNumber == 202) { freqLimits.scn_max_25 = current_ch.frequency/25; } //Scan Upper Limit
+      if (ChannelNumber == 301) { freqLimits.aprs_25    = current_ch.frequency/25; } //APRS Frequency
+      if (ChannelNumber == 302) { freqLimits.iss_25     = current_ch.frequency/25; } //ISS APRS Frequency
+      if (ChannelNumber == 401) { freqLimits.vna_min_25 = current_ch.frequency/25; } //VNA minimum frequency
+      if (ChannelNumber == 402) { freqLimits.vna_max_25 = current_ch.frequency/25; } //VNA maximum frequency
+      if (ChannelNumber <= 402) { EEPROM.put(EEPROM_SPECIALFRQ_BLCKSTART,freqLimits); }
+      if (ChannelNumber == 600) { APRS_Timeout =  current_ch.frequency % 1000; eeprom_writeAPRS(); } //APRS Timeout
+      if (ChannelNumber == 666) { initialize_eeprom(); } //initialize eeprom
+      if (ChannelNumber == 667) { softResetDevice(); } //rest/reboot device
+      if (ChannelNumber == 998) { radio_type = 1 ; initialize_eeprom(); } //Initiralize device
+      if (ChannelNumber == 999) { radio_type = 0 ; initialize_eeprom(); } //Initiralize device
+      if (ChannelNumber >= 998) { softResetDevice(); }
+      Alert_Tone(SUCC_tone);
+    }  
+
+}
+
