@@ -436,10 +436,13 @@ void initWebUI() {
         for (JsonObject repo : arr) {
             if (count >= 50) break;
             
-            uint32_t freq = repo["f"] | 1638375;
-            uint16_t shift = repo["s"] | 0;
-            uint8_t tone = repo["t"] | 0;
-            String name = repo["n"] | "";
+            uint32_t freq = repo["f"].as<uint32_t>();
+            if (freq == 0) freq = 1638375;
+            uint16_t shift = repo["s"].as<uint16_t>();
+            uint8_t tone = repo["t"].as<uint8_t>();
+            String name = repo["n"].as<String>();
+            
+            Serial.printf("Saving CH-%d at loc %d: freq=%d, name='%s'\n", count+1, EEPROM_MEMDATA_BLCKSTART + (count + 1) * EEPROM_CHNNL_SIZE, freq, name.c_str());
             
             memorych_t m;
             uint16_t loc = EEPROM_MEMDATA_BLCKSTART + (count + 1) * EEPROM_CHNNL_SIZE;
