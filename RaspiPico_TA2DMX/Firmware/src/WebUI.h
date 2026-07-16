@@ -413,6 +413,8 @@ void initWebUI() {
         }
         
         String json = server.arg("plain");
+        Serial.println("RAW PAYLOAD RECEIVED:");
+        Serial.println(json);
         DynamicJsonDocument doc(8192);
         DeserializationError error = deserializeJson(doc, json);
         
