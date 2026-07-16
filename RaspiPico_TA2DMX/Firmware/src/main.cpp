@@ -794,11 +794,15 @@ void loop() {
                 EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, current_ch);
                 EEPROM.commit();
             } else {
-                current_memory_channel++;
-                if (current_memory_channel > 50) current_memory_channel = 1;
+                int starting_channel = current_memory_channel;
                 char chStr[3];
-                sprintf(chStr, "%02d", current_memory_channel);
-                GetMemoryChannel(chStr);
+                do {
+                    current_memory_channel++;
+                    if (current_memory_channel > 50) current_memory_channel = 1;
+                    sprintf(chStr, "%02d", current_memory_channel);
+                    GetMemoryChannel(chStr);
+                } while (strncmp(FRQ, "NULL", 4) == 0 && current_memory_channel != starting_channel);
+                
                 EEPROM.write(EEPROM_CURR_MEMCH_ADDR, current_memory_channel);
                 EEPROM.commit();
                 write_FRQ(current_ch.frequency); // For now just show freq, later show name
@@ -813,11 +817,15 @@ void loop() {
                 EEPROM.put(EEPROM_CURRCHNL_BLCKSTART, current_ch);
                 EEPROM.commit();
             } else {
-                current_memory_channel--;
-                if (current_memory_channel < 1) current_memory_channel = 50;
+                int starting_channel = current_memory_channel;
                 char chStr[3];
-                sprintf(chStr, "%02d", current_memory_channel);
-                GetMemoryChannel(chStr);
+                do {
+                    current_memory_channel--;
+                    if (current_memory_channel < 1) current_memory_channel = 50;
+                    sprintf(chStr, "%02d", current_memory_channel);
+                    GetMemoryChannel(chStr);
+                } while (strncmp(FRQ, "NULL", 4) == 0 && current_memory_channel != starting_channel);
+                
                 EEPROM.write(EEPROM_CURR_MEMCH_ADDR, current_memory_channel);
                 EEPROM.commit();
                 write_FRQ(current_ch.frequency);

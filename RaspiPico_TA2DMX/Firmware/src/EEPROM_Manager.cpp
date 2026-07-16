@@ -73,15 +73,15 @@ void initialize_eeprom() {
 
 
     memorych_t memch;
-    memch.frequency25 = 5820; //145500 / 25
-    memch.shift25      = 24;    //600 / 25
-    memch.tone_position= 8;     //88.5
-    memch.SSTP         = 1;     // No shift, tone off. power low
-    memch.ChannelName[0]  = 'K';
-    memch.ChannelName[1]  = 'A';
-    memch.ChannelName[2]  = 'N';
-    memch.ChannelName[3]  = 'A';
-    memch.ChannelName[4]  = 'L';
+    memch.frequency25 = 65535; // 1638375 / 25
+    memch.shift25      = 0;
+    memch.tone_position= 0;
+    memch.SSTP         = 0;
+    memch.ChannelName[0]  = ' ';
+    memch.ChannelName[1]  = ' ';
+    memch.ChannelName[2]  = ' ';
+    memch.ChannelName[3]  = ' ';
+    memch.ChannelName[4]  = ' ';
     memch.ChannelName[5]  = ' ';
     memch.ChannelName[6]  = ' ';
 

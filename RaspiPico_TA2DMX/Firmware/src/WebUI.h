@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Updater.h>
+#include <ArduinoJson.h>
 #include "main.h"
 
 extern String mycall; // From main.cpp
