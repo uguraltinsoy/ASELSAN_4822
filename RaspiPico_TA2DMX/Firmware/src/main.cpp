@@ -528,6 +528,23 @@ void setup() {
       char chStr[3];
       sprintf(chStr, "%02d", current_memory_channel);
       GetMemoryChannel(chStr); 
+      
+      // Eger acilista denk gelinen kanal bossa (NULL ise), siradaki dolu kanali bul
+      if (strncmp(FRQ, "NULL", 4) == 0) {
+          int starting_channel = current_memory_channel;
+          do {
+              current_memory_channel++;
+              if (current_memory_channel > 50) current_memory_channel = 1;
+              sprintf(chStr, "%02d", current_memory_channel);
+              GetMemoryChannel(chStr);
+          } while (strncmp(FRQ, "NULL", 4) == 0 && current_memory_channel != starting_channel);
+          
+          // Eger degistiyse yeni pozisyonu kaydet
+          if (current_memory_channel != starting_channel) {
+              EEPROM.write(EEPROM_CURR_MEMCH_ADDR, current_memory_channel);
+              EEPROM.commit();
+          }
+      }
   }
  
   SetTone(current_ch.tone_enabled);
@@ -840,6 +857,21 @@ void loop() {
                 char chStr[3];
                 sprintf(chStr, "%02d", current_memory_channel);
                 GetMemoryChannel(chStr); 
+                
+                // Eger gecis yapilan kanal bossa, siradaki dolu kanali bul
+                if (strncmp(FRQ, "NULL", 4) == 0) {
+                    int starting_channel = current_memory_channel;
+                    do {
+                        current_memory_channel++;
+                        if (current_memory_channel > 50) current_memory_channel = 1;
+                        sprintf(chStr, "%02d", current_memory_channel);
+                        GetMemoryChannel(chStr);
+                    } while (strncmp(FRQ, "NULL", 4) == 0 && current_memory_channel != starting_channel);
+                    
+                    if (current_memory_channel != starting_channel) {
+                        EEPROM.write(EEPROM_CURR_MEMCH_ADDR, current_memory_channel);
+                    }
+                }
             } else {
                 op_mode = MODE_VFO;
                 Serialprint("[MODE] Serbest (VFO) Moduna Gecildi\r\n");
