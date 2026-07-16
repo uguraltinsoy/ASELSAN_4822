@@ -120,8 +120,7 @@ const char* htmlPage = R"rawliteral(
                     </tbody>
                 </table>
             </div>
-            <div style="margin-top: 15px; display: flex; justify-content: space-between;">
-                <button class="btn-success" onclick="addChannel()" style="background-color: #007bff;">+ Yeni Kanal Ekle</button>
+            <div style="margin-top: 15px; display: flex; justify-content: center;">
                 <button class="btn-success" onclick="saveChannels()" id="btnSave">Telsize Kaydet</button>
             </div>
             <p id="channelSaveStatus" style="color: green; text-align: center; font-weight: bold; height: 20px; margin-top: 10px;"></p>
@@ -229,41 +228,32 @@ const char* htmlPage = R"rawliteral(
             <td><input type="number" id="s_${i}" value="${s}"></td>
             <td><input type="number" id="t_${i}" value="${t}"></td>
             <td><input type="text" id="n_${i}" maxlength="7" value="${n}"></td>
-            <td><button onclick="deleteRow(${i})" style="padding: 4px 8px; background: #dc3545; color: white; border: none; border-radius: 3px; cursor: pointer;">Sil</button></td>
+            <td><button onclick="clearRow(${i})" style="padding: 4px 8px; background: #dc3545; color: white; border: none; border-radius: 3px; cursor: pointer;">Temizle</button></td>
         </tr>`;
     }
 
     function renderChannels() {
         let html = '';
-        for(let i=0; i<channelsData.length; i++) {
+        for(let i=0; i<50; i++) {
             let ch = channelsData[i];
-            // Consider empty if frequency is 0xFFFF * 25 (1638375) or 0
-            if (ch.f !== 0 && ch.f !== 1638375 && ch.f !== 4294967295) {
-                html += createRow(i, ch);
+            
+            // Eğer frekans boş değer ise (1638375 veya 0), input kutularını temiz gösterelim.
+            if (!ch || ch.f === 0 || ch.f === 1638375 || ch.f === 4294967295) {
+                ch = { f: "", s: "", t: "", n: "" };
             }
-        }
-        if (html === '') {
-            html = '<tr><td colspan="6" style="text-align:center;">Kayitli kanal yok. Lutfen ekleyin.</td></tr>';
+            html += createRow(i, ch);
         }
         document.getElementById('channelBody').innerHTML = html;
     }
 
-    function addChannel() {
-        let tbody = document.getElementById('channelBody');
-        if (tbody.innerHTML.includes('Kayitli kanal yok')) {
-            tbody.innerHTML = '';
-        }
-        for(let i=0; i<50; i++) {
-            if (!document.getElementById(`row_${i}`)) {
-                tbody.insertAdjacentHTML('beforeend', createRow(i, null));
-                break;
-            }
-        }
-    }
 
-    function deleteRow(i) {
-        let row = document.getElementById(`row_${i}`);
-        if (row) row.remove();
+
+    function clearRow(i) {
+        if(!confirm((i+1) + ". kanalı temizlemek istediğinize emin misiniz?")) return;
+        document.getElementById(`f_${i}`).value = "";
+        document.getElementById(`s_${i}`).value = "";
+        document.getElementById(`t_${i}`).value = "";
+        document.getElementById(`n_${i}`).value = "";
     }
 
     function saveChannels() {
