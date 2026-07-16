@@ -271,24 +271,25 @@ const char* htmlPage = R"rawliteral(
         btn.innerText = "Kaydediliyor...";
         btn.disabled = true;
         
-        let params = new URLSearchParams();
+        let channelsToSave = [];
         for(let i=0; i<50; i++) {
             let row = document.getElementById(`row_${i}`);
             if (row) {
-                params.append('f_' + i, document.getElementById(`f_${i}`).value);
-                params.append('s_' + i, document.getElementById(`s_${i}`).value);
-                params.append('t_' + i, document.getElementById(`t_${i}`).value);
-                params.append('n_' + i, document.getElementById(`n_${i}`).value);
+                channelsToSave.push({
+                    f: parseInt(document.getElementById(`f_${i}`).value),
+                    s: parseInt(document.getElementById(`s_${i}`).value),
+                    t: parseInt(document.getElementById(`t_${i}`).value),
+                    n: document.getElementById(`n_${i}`).value
+                });
             } else {
-                params.append('f_' + i, '1638375');
-                params.append('s_' + i, '0');
-                params.append('t_' + i, '0');
-                params.append('n_' + i, '');
+                channelsToSave.push({ f: 1638375, s: 0, t: 0, n: "" });
             }
         }
+        
         fetch('/saveChannels', {
             method: 'POST',
-            body: params
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(channelsToSave)
         }).then(res => {
             let status = document.getElementById('channelSaveStatus');
             btn.innerText = "Telsize Kaydet";
@@ -416,30 +417,45 @@ void initWebUI() {
     });
 
     server.on("/saveChannels", HTTP_POST, []() {
-        for(int i=0; i<50; i++) {
-            String prefix = String(i);
-            if(server.hasArg("f_" + prefix)) {
-                uint32_t freq = server.arg("f_" + prefix).toInt();
-                uint16_t shift = server.arg("s_" + prefix).toInt();
-                uint8_t tone = server.arg("t_" + prefix).toInt();
-                String name = server.arg("n_" + prefix);
-                
-                memorych_t m;
-                // Make sure to read current values first so we don't overwrite SSTP incorrectly
-                uint16_t loc = EEPROM_MEMDATA_BLCKSTART + (i + 1) * EEPROM_CHNNL_SIZE;
-                EEPROM.get(loc, m);
-                
-                m.frequency25 = freq / 25;
-                m.shift25 = shift / 25;
-                m.tone_position = tone;
-                
-                for(int j=0; j<7; j++) {
-                    if(j < name.length()) m.ChannelName[j] = name[j];
-                    else m.ChannelName[j] = ' ';
-                }
-                
-                EEPROM.put(loc, m);
+        if (!server.hasArg("plain")) {
+            server.send(400, "text/plain", "Body not found");
+            return;
+        }
+        
+        String json = server.arg("plain");
+        DynamicJsonDocument doc(8192);
+        DeserializationError error = deserializeJson(doc, json);
+        
+        if (error) {
+            server.send(400, "text/plain", "Invalid JSON");
+            return;
+        }
+
+        JsonArray arr = doc.as<JsonArray>();
+        int count = 0;
+        for (JsonObject repo : arr) {
+            if (count >= 50) break;
+            
+            uint32_t freq = repo["f"] | 1638375;
+            uint16_t shift = repo["s"] | 0;
+            uint8_t tone = repo["t"] | 0;
+            String name = repo["n"] | "";
+            
+            memorych_t m;
+            uint16_t loc = EEPROM_MEMDATA_BLCKSTART + (count + 1) * EEPROM_CHNNL_SIZE;
+            EEPROM.get(loc, m);
+            
+            m.frequency25 = freq / 25;
+            m.shift25 = shift / 25;
+            m.tone_position = tone;
+            
+            for(int j=0; j<7; j++) {
+                if(j < name.length()) m.ChannelName[j] = name[j];
+                else m.ChannelName[j] = ' ';
             }
+            
+            EEPROM.put(loc, m);
+            count++;
         }
         EEPROM.commit();
         server.send(200, "text/plain", "OK");

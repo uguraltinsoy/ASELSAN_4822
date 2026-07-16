@@ -802,6 +802,7 @@ void loop() {
                 EEPROM.write(EEPROM_CURR_MEMCH_ADDR, current_memory_channel);
                 EEPROM.commit();
                 write_FRQ(current_ch.frequency); // For now just show freq, later show name
+                writeFRQToLcd(FRQ);
             }
           break; // 'U' 
           case 'D':
@@ -820,6 +821,7 @@ void loop() {
                 EEPROM.write(EEPROM_CURR_MEMCH_ADDR, current_memory_channel);
                 EEPROM.commit();
                 write_FRQ(current_ch.frequency);
+                writeFRQToLcd(FRQ);
             }
           break; // 'D'
           case 'M': //Reverse was originally here, but 'R' does it too.
@@ -840,6 +842,7 @@ void loop() {
             EEPROM.write(EEPROM_OP_MODE_ADDR, op_mode);
             EEPROM.commit();
             write_FRQ(current_ch.frequency);
+            writeFRQToLcd(FRQ);
           break; // 'M'
           case 'C':
             //VNA Vector Network analizor Subroutines
