@@ -90,6 +90,7 @@ bool     pllDoubleWrite = false;
 uint16_t pllRefreshMs = 0;
 uint8_t  pttActiveLevel = HIGH;   // 't' ile degistirilir
 uint16_t pllR = 1024;             // R sayaci: 1024 -> PD 12.5 kHz (TAMSAT_KIT birebir), 512 -> PD 25 kHz
+int8_t   uhfBandOverride = -1;    // 'b' ile degistirilir (-1: Oto, 0: 00, 1: 01, 2: 10, 3: 11)
 uint8_t  micTxMode = 0;           // 'v' ile degistirilir (0: INPUT, 1: OUTPUT LOW [TAMSAT], 2: OUTPUT HIGH, 3: PWM)
 
 void pttKey(bool on) {

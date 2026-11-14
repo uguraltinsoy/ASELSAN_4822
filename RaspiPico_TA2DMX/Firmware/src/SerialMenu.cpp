@@ -24,6 +24,7 @@ void PrintMenu()
   Serialprint("p-PTT Otomatik Testi (3 saniye)\n\r");
   Serialprint("t-PTT Polaritesi Degistir\n\r");
   Serialprint("r-R Sayaci Degistir (1024/512)\n\r");
+  Serialprint("b-UHF Alt-Bant (BS0/BS1) Degistir (su an %d)\n\r", uhfBandOverride);
   Serialprint("v-CTCSS Ton Modu Degistir (su an %d)\n\r", micTxMode);
   Serialprint("Seciminiz >\n\r");
 }

@@ -101,6 +101,7 @@ extern uint16_t pllBitDelayUs;
 extern bool     pllDoubleWrite;
 extern uint16_t pllRefreshMs;
 extern uint16_t pllR;
+extern int8_t   uhfBandOverride; // -1: Otomatik, 0: 00, 1: 01, 2: 10, 3: 11
 void pllApplyMode(uint8_t m);
 void pllNextMode();
 

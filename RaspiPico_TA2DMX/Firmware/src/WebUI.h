@@ -365,7 +365,7 @@ const char* htmlPage = R"rawliteral(
                         <label>Cihaz Bandı (TAMSAT Kart Tipi):</label>
                         <select id="radio_type">
                             <option value="0">VHF (134 - 174 MHz - ASELSAN 4822)</option>
-                            <option value="1">UHF (400 - 470 MHz - ASELSAN 4826)</option>
+                            <option value="1">UHF (428.150 - 450.000 MHz - ASELSAN 4826)</option>
                         </select>
                     </div>
                     <div style="display:flex; align-items:flex-end;">
@@ -1173,7 +1173,9 @@ void initWebUI() {
         }
         if (server.hasArg("vfo_freq")) {
             uint32_t vf = (uint32_t)server.arg("vfo_freq").toInt();
-            if (vf >= 134000UL && vf <= 470000UL) {
+            uint32_t minF = (radio_type == 0) ? ((uint32_t)freqLimits.trx_min_25 * 25UL) : 428150UL;
+            uint32_t maxF = (radio_type == 0) ? ((uint32_t)freqLimits.trx_max_25 * 25UL) : 450000UL;
+            if (vf >= minF && vf <= maxF) {
                 current_ch.frequency = (vf / 25UL) * 25UL;
             }
         }
