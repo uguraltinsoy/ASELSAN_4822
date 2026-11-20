@@ -14,9 +14,6 @@
 void Alert_Tone(int ToneType)
 {
   if (TRX_MODE == TX) return;
-  noTone(MIC_PIN);
-  pinMode(MIC_PIN, OUTPUT);
-  digitalWrite(MIC_PIN, LOW);
   if (ToneType == OK_tone)   { tone(ALERT_PIN, 1000, ALERT_MODE); Serialprint(" OK\r\n"); }
   if (ToneType == ERR_tone)  { tone(ALERT_PIN, 400, ALERT_MODE * 2); }
   if (ToneType == SUCC_tone) { tone(ALERT_PIN, 600, ALERT_MODE); delay(200); tone(ALERT_PIN, 1000, ALERT_MODE); }
@@ -247,8 +244,9 @@ void setup()
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH);
   pinMode(SQL_ACTIVE, INPUT);
-  pinMode(MIC_PIN, OUTPUT);
-  digitalWrite(MIC_PIN, LOW);
+  gpio_init(MIC_PIN);
+  gpio_set_dir(MIC_PIN, GPIO_IN);
+  gpio_set_pulls(MIC_PIN, false, false);
 
   pinMode(RF_POWER_PIN, OUTPUT);
   digitalWrite(RF_POWER_PIN, RF_POWER_STATE);
@@ -488,7 +486,8 @@ void setup()
   validFRQ = (op_mode == MODE_MR) ? true : Calculate_Frequency(FRQ);
   write_FRQ(current_ch.frequency);
 
-  Serialprint("[BOOT] radio_type=%d validFRQ=%d freq=%lu shift_dir=%d shift=%d\r\n",
+  Serialprint("[BOOT] resetReason=%d freeHeap=%u radio_type=%d validFRQ=%d freq=%lu shift_dir=%d shift=%d\r\n",
+              (int)rp2040.getResetReason(), (unsigned int)rp2040.getFreeHeap(),
               radio_type, validFRQ, (unsigned long)current_ch.frequency,
               current_ch.shift_dir, current_ch.shift);
 
@@ -497,7 +496,6 @@ void setup()
 #if WIFI_AT_BOOT
   initWebUI();
 #endif
-  startWebAudioEngine();
 
   Led_Status = 240 - backlight;
   resetKeypadPCF();
@@ -539,6 +537,7 @@ void loop()
   if (webAudioRxActive && (millis() - lastAudioRxPollMs > 3500UL)) {
     webAudioRxActive = false;
   }
+  startWebAudioEngine();
 
   uint8_t effectivePtt = (debouncedPttInput == HIGH || webPttActive) ? HIGH : LOW;
   TRX_MODE = TXTimeOutTimer(effectivePtt);
@@ -1168,58 +1167,95 @@ void stop_tone()
   gpio_set_pulls(MIC_PIN, false, false);
 }
 
+static struct repeating_timer web_audio_timer;
+static bool web_audio_timer_started = false;
+static int32_t adc_dc_accum = (2048 << 8);
+static uint8_t lastWebTxSample = 128;
+static uint32_t webCtcssPhaseQ16 = 0;
+static volatile uint32_t webCtcssStepQ16 = 0;
+static bool webTxBuffering = true;
+
+static const int8_t __not_in_flash("ctcss_lut") ctcss_offset_lut[64] = {
+    0,   1,   3,   4,   6,   7,   8,  10,  11,  12,  13,  13,  14,  15,  15,  15,
+   15,  15,  15,  15,  14,  13,  13,  12,  11,  10,   8,   7,   6,   4,   3,   1,
+    0,  -1,  -3,  -4,  -6,  -7,  -8, -10, -11, -12, -13, -13, -14, -15, -15, -15,
+  -15, -15, -15, -15, -14, -13, -13, -12, -11, -10,  -8,  -7,  -6,  -4,  -3,  -1
+};
+
+static void releaseMicPinHighZ()
+{
+  pwm_set_enabled(pwm_gpio_to_slice_num(MIC_PIN), false);
+  gpio_init(MIC_PIN);
+  gpio_set_dir(MIC_PIN, GPIO_IN);
+  gpio_set_pulls(MIC_PIN, false, false);
+}
+
+static void updateWebCtcssStep()
+{
+  if (current_ch.tone_enabled == CTCSS_ON) {
+    float f = (current_ch.tone_pos >= 0 && current_ch.tone_pos < TOTAL_TONES)
+              ? ctcss_tone_list[current_ch.tone_pos] : 88.5f;
+    webCtcssStepQ16 = (uint32_t)(f * 524.288f); // 64 * 65536 / 8000 = 524.288
+  } else {
+    webCtcssStepQ16 = 0;
+  }
+}
+
+static void initWebTxPwm()
+{
+  updateWebCtcssStep();
+  gpio_set_function(MIC_PIN, GPIO_FUNC_PWM);
+  uint s = pwm_gpio_to_slice_num(MIC_PIN);
+  pwm_config cfg = pwm_get_default_config();
+  pwm_config_set_clkdiv(&cfg, 1.0f);
+  pwm_config_set_wrap(&cfg, 255);
+  pwm_init(s, &cfg, true);
+  pwm_set_chan_level(s, pwm_gpio_to_channel(MIC_PIN), 128);
+}
+
 void SetTone(int toneSTATE)
 {
+  (void)toneSTATE;
   noTone(ALERT_PIN);
   if (timer_active) {
     cancel_repeating_timer(&tone_timer);
     timer_active = false;
   }
-  pwm_set_enabled(pwm_gpio_to_slice_num(MIC_PIN), false);
-
-  if (TRX_MODE == RX) {
-    gpio_init(MIC_PIN);
-    gpio_set_dir(MIC_PIN, GPIO_OUT);
-    gpio_put(MIC_PIN, 0);
+  if (TRX_MODE == TX && webPttActive) {
+    initWebTxPwm();
   } else {
-    if (toneSTATE == CTCSS_ON && !webPttActive) {
-      float f = (current_ch.tone_pos >= 0 && current_ch.tone_pos < TOTAL_TONES)
-                ? ctcss_tone_list[current_ch.tone_pos] : 88.5f;
-      if (micTxMode == 1) {
-        start_tone(f);
-      } else {
-        analogWriteFreq(f);
-        analogWrite(MIC_PIN, 5);
-      }
-    } else if (webPttActive) {
-      gpio_set_function(MIC_PIN, GPIO_FUNC_PWM);
-      uint s = pwm_gpio_to_slice_num(MIC_PIN);
-      pwm_set_wrap(s, 255);
-      pwm_set_chan_level(s, pwm_gpio_to_channel(MIC_PIN), 128);
-      pwm_set_enabled(s, true);
-    } else {
-      gpio_init(MIC_PIN);
-      gpio_put(MIC_PIN, 1);
-      gpio_set_dir(MIC_PIN, GPIO_IN);
-      gpio_set_pulls(MIC_PIN, false, false);
-      gpio_deinit(MIC_PIN);
-    }
+    // El mikrofonu hattini (J1-8) R1 (100R) uzerinden saseye bogmamak icin GP10 High-Z (Giris) birakilir
+    releaseMicPinHighZ();
   }
 }
 
-static struct repeating_timer web_audio_timer;
-static bool web_audio_timer_started = false;
-static int32_t adc_dc_accum = (2048 << 8);
-
-bool audio_engine_timer_cb(struct repeating_timer *t)
+bool __not_in_flash_func(audio_engine_timer_cb)(struct repeating_timer *t)
 {
   if (webPttActive && TRX_MODE == TX) {
+    uint16_t head = audioTxHead;
     uint16_t tail = audioTxTail;
-    if (tail != audioTxHead) {
-      uint8_t sample = audioTxRing[tail];
-      audioTxTail = (tail + 1) & (AUDIO_RING_SIZE - 1);
-      pwm_set_chan_level(pwm_gpio_to_slice_num(MIC_PIN), pwm_gpio_to_channel(MIC_PIN), sample);
+    uint16_t avail = (head - tail) & (AUDIO_RING_SIZE - 1);
+    if (webTxBuffering) {
+      if (avail >= 320) {
+        webTxBuffering = false;
+      }
     }
+    if (!webTxBuffering && avail > 0) {
+      lastWebTxSample = audioTxRing[tail];
+      audioTxTail = (tail + 1) & (AUDIO_RING_SIZE - 1);
+    } else {
+      if (avail == 0) webTxBuffering = true;
+      lastWebTxSample = (uint8_t)(((uint16_t)lastWebTxSample * 15U + 128U) >> 4);
+    }
+    int32_t outSample = (int32_t)lastWebTxSample;
+    uint32_t step = webCtcssStepQ16;
+    if (step != 0) {
+      webCtcssPhaseQ16 += step;
+      outSample += (int32_t)ctcss_offset_lut[(webCtcssPhaseQ16 >> 16) & 0x3F];
+    }
+    if (outSample < 0) outSample = 0;
+    else if (outSample > 255) outSample = 255;
+    pwm_set_chan_level(pwm_gpio_to_slice_num(MIC_PIN), pwm_gpio_to_channel(MIC_PIN), (uint16_t)outSample);
     return true;
   }
 
@@ -1256,11 +1292,34 @@ bool audio_engine_timer_cb(struct repeating_timer *t)
 
 void startWebAudioEngine()
 {
-  if (web_audio_timer_started) return;
-  adc_select_input(0);
-  hw_set_bits(&adc_hw->cs, ADC_CS_START_ONCE_BITS);
-  add_repeating_timer_us(-125, audio_engine_timer_cb, NULL, &web_audio_timer);
-  web_audio_timer_started = true;
+  bool needTimer = (webAudioRxActive || webPttActive);
+  if (needTimer && !web_audio_timer_started) {
+    adc_select_input(0);
+    hw_set_bits(&adc_hw->cs, ADC_CS_START_ONCE_BITS);
+    add_repeating_timer_us(-125, audio_engine_timer_cb, NULL, &web_audio_timer);
+    web_audio_timer_started = true;
+  } else if (!needTimer && web_audio_timer_started) {
+    cancel_repeating_timer(&web_audio_timer);
+    web_audio_timer_started = false;
+  } else if (!web_audio_timer_started && TRX_MODE == RX) {
+    static unsigned long lastIdleAdcMs = 0;
+    unsigned long now = millis();
+    if (now - lastIdleAdcMs >= 2UL) {
+      lastIdleAdcMs = now;
+      uint16_t raw = (uint16_t)(adc_hw->result & 0x0FFFU);
+      hw_set_bits(&adc_hw->cs, ADC_CS_START_ONCE_BITS);
+      adc_dc_accum += ((int32_t)raw - (adc_dc_accum >> 8));
+      int32_t centered = (int32_t)raw - (adc_dc_accum >> 8);
+      if (CHANNEL_BUSY != 0 && SQL_MODE == SQL_ON) {
+        centered = 0;
+      }
+      int32_t absVal = (centered < 0) ? -centered : centered;
+      uint8_t instPeak = (absVal > 511) ? 100 : (uint8_t)((absVal * 100) >> 9);
+      if (instPeak > audioRxPeak) {
+        audioRxPeak = instPeak;
+      }
+    }
+  }
 }
 
 void setWebPttState(bool on)
@@ -1268,17 +1327,18 @@ void setWebPttState(bool on)
   if (on) {
     lastWebPttMs = millis();
     if (!webPttActive) {
+      webTxBuffering = true;
+      lastWebTxSample = 128;
       webPttActive = true;
-      gpio_set_function(MIC_PIN, GPIO_FUNC_PWM);
-      uint s = pwm_gpio_to_slice_num(MIC_PIN);
-      pwm_set_wrap(s, 255);
-      pwm_set_chan_level(s, pwm_gpio_to_channel(MIC_PIN), 128);
-      pwm_set_enabled(s, true);
+      initWebTxPwm();
     }
   } else {
     if (webPttActive) {
       webPttActive = false;
+      webTxBuffering = true;
       audioTxTail = audioTxHead;
+      lastWebTxSample = 128;
+      releaseMicPinHighZ();
     }
   }
 }

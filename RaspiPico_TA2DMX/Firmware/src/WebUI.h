@@ -3,6 +3,15 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <HTTPServer.h>
+#undef HTTP_MAX_CLOSE_WAIT
+#define HTTP_MAX_CLOSE_WAIT 120
+#undef HTTP_MAX_DATA_WAIT
+#define HTTP_MAX_DATA_WAIT 600
+#undef HTTP_MAX_POST_WAIT
+#define HTTP_MAX_POST_WAIT 1000
+#undef HTTP_MAX_SEND_WAIT
+#define HTTP_MAX_SEND_WAIT 1000
 #include <WebServer.h>
 #include <Updater.h>
 #include <LittleFS.h>
@@ -850,7 +859,7 @@ const char* htmlPage = R"rawliteral(
 </head>
 <body>
     <div class="navbar">
-        <h2><span id="navModel">ASELSAN 4822</span> <span id="navCallsign" class="badge-ver">%CALLSIGN%</span> <span class="badge-ver">%VERSION%</span></h2>
+        <h2><span id="navModel">ASELSAN 4822</span> <span id="navCallsign" class="badge-ver">TA2DMX</span> <span id="navVersion" class="badge-ver">v3.5</span></h2>
         <div class="nav-links">
             <button class="tablinks active" onclick="openTab(event, 'Ayarlar')">1. Canlı Kontrol &amp; Ayarlar</button>
             <button class="tablinks" onclick="openTab(event, 'APRS')">2. APRS</button>
@@ -1018,8 +1027,8 @@ const char* htmlPage = R"rawliteral(
                     <button type="button" class="btn-audio-rx" id="btnAudioRx" onclick="toggleWebAudioRx(false)">🔊 Web Ses Dinle (RX)</button>
                     <div class="rx-vol-wrap" title="Web Hoparlör Ses Seviyesi">
                         <span style="font-size:12px;">🔉</span>
-                        <input type="range" class="rx-vol-slider" id="rxVolSlider" min="0" max="150" value="60" oninput="setRxVolume(false, this.value)">
-                        <span class="rx-vol-pct" id="rxVolText">%60</span>
+                        <input type="range" class="rx-vol-slider" id="rxVolSlider" min="0" max="200" value="100" oninput="setRxVolume(false, this.value)">
+                        <span class="rx-vol-pct" id="rxVolText">%100</span>
                     </div>
                     <div class="vu-box" title="SP (ADC0 / GP26) Canlı Ses Giriş Seviyesi">
                         <span class="vu-lbl" id="vuText">SES: %0</span>
@@ -1031,6 +1040,7 @@ const char* htmlPage = R"rawliteral(
                         🎙️ BAS-KONUŞ (PTT)
                     </button>
                 </div>
+                <div id="micPermHelp" style="display:none; background:#1e293b; border:1px solid #f59e0b; border-radius:6px; padding:8px 10px; margin-top:6px; font-size:11.5px; color:#f8fafc; line-height:1.45;"></div>
                 <div id="liveActionStatus" class="status-msg" style="margin-top:4px; min-height:0;"></div>
             </div>
 
@@ -1167,8 +1177,8 @@ const char* htmlPage = R"rawliteral(
                     <button type="button" class="btn-audio-rx" id="peerBtnAudioRx" onclick="toggleWebAudioRx(true)">🔊 Web Ses Dinle (RX)</button>
                     <div class="rx-vol-wrap" title="Eş Telsiz Web Hoparlör Ses Seviyesi">
                         <span style="font-size:12px;">🔉</span>
-                        <input type="range" class="rx-vol-slider" id="peerRxVolSlider" min="0" max="150" value="60" oninput="setRxVolume(true, this.value)">
-                        <span class="rx-vol-pct" id="peerRxVolText">%60</span>
+                        <input type="range" class="rx-vol-slider" id="peerRxVolSlider" min="0" max="200" value="100" oninput="setRxVolume(true, this.value)">
+                        <span class="rx-vol-pct" id="peerRxVolText">%100</span>
                     </div>
                     <div class="vu-box" title="Eş Telsiz SP (ADC0 / GP26) Canlı Ses Giriş Seviyesi">
                         <span class="vu-lbl" id="peerVuText">SES: %0</span>
@@ -1538,6 +1548,8 @@ const char* htmlPage = R"rawliteral(
         liveState = d;
         const isUhf = (Number(d.radio_type) === 1);
         document.getElementById('navModel').innerText = isUhf ? 'ASELSAN 4826' : 'ASELSAN 4822';
+        if (d.callsign) document.getElementById('navCallsign').innerText = d.callsign;
+        if (d.ver) document.getElementById('navVersion').innerText = d.ver;
         let csTag = d.callsign ? (' [' + d.callsign + ']') : '';
         document.getElementById('panelModelTitle').innerText = (isUhf
             ? 'MV 4826 UHF / FM (428.150 - 450.000 MHz)'
@@ -1728,7 +1740,7 @@ const char* htmlPage = R"rawliteral(
     }
 
     function setRxVolume(isPeer, val) {
-        const pct = Math.max(0, Math.min(150, Number(val)));
+        const pct = Math.max(0, Math.min(200, Number(val)));
         if (isPeer) {
             const lbl = document.getElementById('peerRxVolText');
             if (lbl) lbl.innerText = '%' + pct;
@@ -1777,6 +1789,9 @@ const char* htmlPage = R"rawliteral(
         }
     }
 
+    let localRxInFlight = false;
+    let peerRxInFlight = false;
+
     function toggleWebAudioRx(isPeer) {
         ensureAudioCtx();
         if (isPeer) {
@@ -1784,19 +1799,26 @@ const char* htmlPage = R"rawliteral(
             if (peerRxTimer) {
                 clearInterval(peerRxTimer);
                 peerRxTimer = null;
+                peerRxInFlight = false;
                 btn.classList.remove('listening');
                 btn.innerText = '🔊 Web Ses Dinle (RX)';
             } else {
                 btn.classList.add('listening');
                 btn.innerText = '🔊 Dinleniyor (Kapat)';
                 peerNextPlayTime = 0;
+                peerRxInFlight = false;
                 peerRxTimer = setInterval(() => {
+                    if (webPttTimer || peerRxInFlight) return;
                     let base = getPeerBaseUrl();
                     if (!base) return;
-                    fetch(base + '/api/audio_rx')
+                    peerRxInFlight = true;
+                    const ctrl = new AbortController();
+                    const tid = setTimeout(() => ctrl.abort(), 800);
+                    fetch(base + '/api/audio_rx', { signal: ctrl.signal })
                         .then(r => r.arrayBuffer())
                         .then(ab => { if (ab.byteLength > 0) playPcmChunk(new Uint8Array(ab), true); })
-                        .catch(() => {});
+                        .catch(() => {})
+                        .finally(() => { clearTimeout(tid); peerRxInFlight = false; });
                 }, 160);
             }
         } else {
@@ -1804,17 +1826,24 @@ const char* htmlPage = R"rawliteral(
             if (localRxTimer) {
                 clearInterval(localRxTimer);
                 localRxTimer = null;
+                localRxInFlight = false;
                 btn.classList.remove('listening');
                 btn.innerText = '🔊 Web Ses Dinle (RX)';
             } else {
                 btn.classList.add('listening');
                 btn.innerText = '🔊 Dinleniyor (Kapat)';
                 localNextPlayTime = 0;
+                localRxInFlight = false;
                 localRxTimer = setInterval(() => {
-                    fetch('/api/audio_rx')
+                    if (webPttTimer || localRxInFlight) return;
+                    localRxInFlight = true;
+                    const ctrl = new AbortController();
+                    const tid = setTimeout(() => ctrl.abort(), 800);
+                    fetch('/api/audio_rx', { signal: ctrl.signal })
                         .then(r => r.arrayBuffer())
                         .then(ab => { if (ab.byteLength > 0) playPcmChunk(new Uint8Array(ab), false); })
-                        .catch(() => {});
+                        .catch(() => {})
+                        .finally(() => { clearTimeout(tid); localRxInFlight = false; });
                 }, 160);
             }
         }
@@ -1823,21 +1852,117 @@ const char* htmlPage = R"rawliteral(
     let webPttTimer = null;
     let webPttPeerMode = false;
     let micStream = null;
+    let micSource = null;
     let micProcessor = null;
     let micMuteGain = null;
     let txPcmHexBuf = '';
     let txInFlight = false;
     let txKeepaliveTick = 0;
 
-    function sendTxPayload(base, bodyStr) {
+    function copyTextHelper(txt, btnEl) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(txt).catch(() => {});
+        } else {
+            const ta = document.createElement('textarea');
+            ta.value = txt;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta);
+        }
+        if (btnEl) {
+            const old = btnEl.innerText;
+            btnEl.innerText = '✅ Kopyalandı!';
+            setTimeout(() => { btnEl.innerText = old; }, 1500);
+        }
+    }
+
+    function showMicInsecureHelp(errMsg) {
+        const box = document.getElementById('micPermHelp');
+        if (!box) return;
+        const orig = window.location.origin || 'http://192.168.4.1';
+        const flagUrl = 'chrome://flags/#unsafely-treat-insecure-origin-as-secure';
+        box.style.display = 'block';
+        box.innerHTML =
+            `<div style="font-weight:700; color:#fbbf24; margin-bottom:4px;">⚠️ Tarayıcı Mikrofon Erişimini Engelledi (${errMsg || 'HTTP Güvenlik Kuralı'})</div>` +
+            `<div>Chrome / Edge / Brave tarayıcıları <code>${orig}</code> (HTTPS olmayan yerel IP) üzerinde mikrofonu varsayılan olarak gizler. <b>10 saniyede kalıcı açmak için:</b></div>` +
+            `<div style="margin-top:6px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">` +
+            `<button type="button" class="btn-audio-rx" style="padding:4px 8px; font-size:11px;" onclick="copyTextHelper('${flagUrl}', this)">📋 1. Flag Adresini Kopyala</button>` +
+            `<span style="color:#94a3b8;">➔ Yeni sekmede adres çubuğuna yapıştırıp açın, kutuya:</span>` +
+            `<button type="button" class="btn-audio-rx" style="padding:4px 8px; font-size:11px;" onclick="copyTextHelper('${orig}', this)">📋 2. ${orig} Kopyala</button>` +
+            `<span style="color:#94a3b8;">yazıp <b>Enabled ➔ Relaunch</b> yapın.</span>` +
+            `<button type="button" class="btn-audio-rx" style="padding:4px 8px; font-size:11px; margin-left:auto;" onclick="document.getElementById('micPermHelp').style.display='none'">✖ Kapat</button>` +
+            `</div>`;
+    }
+
+    async function ensureMicReady() {
+        if (micStream && micProcessor) return true;
+        const getUM = (navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+            ? (c) => navigator.mediaDevices.getUserMedia(c)
+            : (navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia
+                ? (c) => new Promise((res, rej) => (navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia).call(navigator, c, res, rej))
+                : null);
+
+        if (!getUM) {
+            showMicInsecureHelp('HTTP üzerinde mediaDevices kapalı');
+            return false;
+        }
+        try {
+            ensureAudioCtx();
+            micStream = await getUM({
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            });
+            const box = document.getElementById('micPermHelp');
+            if (box) box.style.display = 'none';
+            micSource = audioCtx.createMediaStreamSource(micStream);
+            micProcessor = audioCtx.createScriptProcessor(2048, 1, 1);
+            micMuteGain = audioCtx.createGain();
+            micMuteGain.gain.value = 0;
+            const ratio = audioCtx.sampleRate / 8000.0;
+            micProcessor.onaudioprocess = function(e) {
+                if (!webPttTimer) return;
+                const input = e.inputBuffer.getChannelData(0);
+                const outLen = Math.floor(input.length / ratio);
+                let hex = '';
+                let peak = 0;
+                for (let i = 0; i < outLen; i++) {
+                    let s = input[Math.floor(i * ratio)];
+                    let av = Math.abs(s);
+                    if (av > peak) peak = av;
+                    let boosted = Math.tanh(s * 4.5);
+                    let b = Math.max(0, Math.min(255, Math.round((boosted + 1.0) * 127.5)));
+                    hex += b.toString(16).padStart(2, '0');
+                }
+                let pct = Math.min(100, Math.round(peak * 350));
+                const vuB = document.getElementById(webPttPeerMode ? 'peerVuBar' : 'vuBar');
+                const vuT = document.getElementById(webPttPeerMode ? 'peerVuText' : 'vuText');
+                if (vuB) vuB.style.width = pct + '%';
+                if (vuT) vuT.innerText = 'MİK: %' + pct;
+                if (txPcmHexBuf.length < 4800) {
+                    txPcmHexBuf += hex;
+                }
+            };
+            micSource.connect(micProcessor);
+            micProcessor.connect(micMuteGain);
+            micMuteGain.connect(audioCtx.destination);
+            return true;
+        } catch (err) {
+            showMicInsecureHelp(err && err.name ? err.name : 'Mikrofon izni verilmedi');
+            return false;
+        }
+    }
+
+    function sendTxPayload(base, queryStr) {
         if (txInFlight) return;
         txInFlight = true;
         const ctrl = new AbortController();
-        const tid = setTimeout(() => ctrl.abort(), 800);
-        fetch(base + '/api/audio_tx', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: bodyStr,
+        const tid = setTimeout(() => ctrl.abort(), 2000);
+        fetch(base + '/api/audio_tx?' + queryStr, {
+            method: 'GET',
             signal: ctrl.signal
         }).catch(() => {}).finally(() => {
             clearTimeout(tid);
@@ -1851,6 +1976,11 @@ const char* htmlPage = R"rawliteral(
         txPcmHexBuf = '';
         txInFlight = false;
         txKeepaliveTick = 0;
+
+        if (!micStream) {
+            ensureMicReady();
+        }
+
         let btn = document.getElementById(isPeer ? 'peerBtnWebPtt' : 'btnWebPtt');
         btn.classList.add('tx-down');
         btn.innerText = '🔴 GÖNDERİLİYOR (TX)...';
@@ -1858,10 +1988,15 @@ const char* htmlPage = R"rawliteral(
         let base = isPeer ? getPeerBaseUrl() : '';
         sendTxPayload(base, 'action=start');
         webPttTimer = setInterval(() => {
-            if (txPcmHexBuf.length > 0) {
+            if (txInFlight) return;
+            if (txPcmHexBuf.length >= 640) {
                 let chunk = txPcmHexBuf;
-                if (chunk.length > 2400) chunk = chunk.slice(-2400);
-                txPcmHexBuf = '';
+                if (chunk.length > 2800) {
+                    chunk = txPcmHexBuf.slice(0, 2800);
+                    txPcmHexBuf = txPcmHexBuf.slice(2800);
+                } else {
+                    txPcmHexBuf = '';
+                }
                 txKeepaliveTick = 0;
                 sendTxPayload(base, 'pcm=' + chunk);
             } else {
@@ -1871,38 +2006,7 @@ const char* htmlPage = R"rawliteral(
                     sendTxPayload(base, 'action=keepalive');
                 }
             }
-        }, 160);
-
-        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-            try {
-                ensureAudioCtx();
-                micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                const src = audioCtx.createMediaStreamSource(micStream);
-                micProcessor = audioCtx.createScriptProcessor(2048, 1, 1);
-                micMuteGain = audioCtx.createGain();
-                micMuteGain.gain.value = 0;
-                const ratio = audioCtx.sampleRate / 8000.0;
-                micProcessor.onaudioprocess = function(e) {
-                    if (!webPttTimer) return;
-                    const input = e.inputBuffer.getChannelData(0);
-                    const outLen = Math.floor(input.length / ratio);
-                    let hex = '';
-                    for (let i = 0; i < outLen; i++) {
-                        let s = input[Math.floor(i * ratio)];
-                        let b = Math.max(0, Math.min(255, Math.round((s + 1.0) * 127.5)));
-                        hex += b.toString(16).padStart(2, '0');
-                    }
-                    if (txPcmHexBuf.length < 4800) {
-                        txPcmHexBuf += hex;
-                    }
-                };
-                src.connect(micProcessor);
-                micProcessor.connect(micMuteGain);
-                micMuteGain.connect(audioCtx.destination);
-            } catch (err) {
-                // HTTP uzerinde mikrofon izni kapaliysa yalnizca tasiyici PTT aktif kalir
-            }
-        }
+        }, 170);
     }
 
     function stopWebPtt(isPeer) {
@@ -1911,20 +2015,13 @@ const char* htmlPage = R"rawliteral(
         webPttTimer = null;
         txPcmHexBuf = '';
         txInFlight = false;
-        if (micProcessor) { try { micProcessor.disconnect(); } catch(e){} micProcessor = null; }
-        if (micMuteGain) { try { micMuteGain.disconnect(); } catch(e){} micMuteGain = null; }
-        if (micStream) { try { micStream.getTracks().forEach(t => t.stop()); } catch(e){} micStream = null; }
 
         let btn = document.getElementById(isPeer ? 'peerBtnWebPtt' : 'btnWebPtt');
         btn.classList.remove('tx-down');
         btn.innerText = '🎙️ BAS-KONUŞ (PTT)';
 
         let base = isPeer ? getPeerBaseUrl() : '';
-        fetch(base + '/api/audio_tx', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: 'action=stop'
-        }).catch(() => {});
+        fetch(base + '/api/audio_tx?action=stop', { method: 'GET' }).catch(() => {});
     }
 
     let activePeerIp = '';
@@ -2051,9 +2148,15 @@ const char* htmlPage = R"rawliteral(
         scanningPeer = false;
     }
 
+    let livePollInFlight = false;
+    let peerPollInFlight = false;
+
     function pollLiveState() {
-        if (document.getElementById('Ayarlar').style.display !== 'block') return;
-        fetch('/api/live')
+        if (webPttTimer || livePollInFlight || document.getElementById('Ayarlar').style.display !== 'block') return;
+        livePollInFlight = true;
+        const ctrl = new AbortController();
+        const tid = setTimeout(() => ctrl.abort(), 1400);
+        fetch('/api/live', { signal: ctrl.signal })
             .then(res => res.json())
             .then(data => {
                 document.getElementById('syncDot').style.background = '#10b981';
@@ -2063,14 +2166,21 @@ const char* htmlPage = R"rawliteral(
             .catch(() => {
                 document.getElementById('syncDot').style.background = '#ef4444';
                 document.getElementById('syncText').innerText = 'BAĞLANTI BEKLENİYOR';
+            })
+            .finally(() => {
+                clearTimeout(tid);
+                livePollInFlight = false;
             });
     }
 
     function pollPeerLiveState() {
-        if (!dualActive || document.getElementById('Ayarlar').style.display !== 'block') return;
+        if (peerPollInFlight || !dualActive || document.getElementById('Ayarlar').style.display !== 'block') return;
         let base = getPeerBaseUrl();
         if (!base) return;
-        fetch(base + '/api/live')
+        peerPollInFlight = true;
+        const ctrl = new AbortController();
+        const tid = setTimeout(() => ctrl.abort(), 1400);
+        fetch(base + '/api/live', { signal: ctrl.signal })
             .then(res => res.json())
             .then(data => {
                 document.getElementById('peerSyncDot').style.background = '#10b981';
@@ -2080,6 +2190,10 @@ const char* htmlPage = R"rawliteral(
             .catch(() => {
                 document.getElementById('peerSyncDot').style.background = '#ef4444';
                 document.getElementById('peerSyncText').innerText = 'EŞ TELSİZ YOK';
+            })
+            .finally(() => {
+                clearTimeout(tid);
+                peerPollInFlight = false;
             });
     }
 
@@ -2726,6 +2840,7 @@ static void sendLiveStateJson() {
     String cleanCall = trimStoredString(mycall);
 
     String json = "{";
+    json += "\"ver\":\"v" + String(SW_MAJOR) + "." + String(SW_MINOR) + "\",";
     json += "\"callsign\":\"" + jsonEscape(cleanCall) + "\",";
     json += "\"ip\":\"" + getCurrentDeviceIp() + "\",";
     json += "\"freq\":" + String(current_ch.frequency) + ",";
@@ -2751,8 +2866,8 @@ static void sendLiveStateJson() {
 
 void handleRoot() {
     sendCorsHeaders();
-    String versionString = "v" + String(SW_MAJOR) + "." + String(SW_MINOR);
     if (!isSetupDone) {
+        String versionString = "v" + String(SW_MAJOR) + "." + String(SW_MINOR);
         String page = String(setupHtmlPage);
         page.replace("%VERSION%", versionString);
         page.replace("%SEL_VHF%", radio_type == 0 ? "selected" : "");
@@ -2761,10 +2876,16 @@ void handleRoot() {
         page.replace("%CHK_UHF%", radio_type == 1 ? "checked" : "");
         server.send(200, "text/html", page);
     } else {
-        String page = String(htmlPage);
-        page.replace("%VERSION%", versionString);
-        page.replace("%CALLSIGN%", trimStoredString(mycall));
-        server.send(200, "text/html", page);
+        size_t totalLen = strlen(htmlPage);
+        server.setContentLength(totalLen);
+        server.send(200, "text/html", "");
+        size_t offset = 0;
+        while (offset < totalLen) {
+            size_t chunk = totalLen - offset;
+            if (chunk > 4096) chunk = 4096;
+            server.sendContent(htmlPage + offset, chunk);
+            offset += chunk;
+        }
     }
 }
 
@@ -2876,9 +2997,8 @@ void initWebUI() {
         server.send_P(200, "application/octet-stream", (const char*)pcmOutBuf, count);
     });
 
-    server.on("/api/audio_tx", HTTP_POST, []() {
+    server.on("/api/audio_tx", HTTP_ANY, []() {
         sendCorsHeaders();
-        server.sendHeader("Connection", "close");
         if (server.hasArg("action")) {
             String act = server.arg("action");
             if (act == "start" || act == "keepalive") {
@@ -2893,7 +3013,7 @@ void initWebUI() {
             setWebPttState(true);
             const String &hexStr = server.arg("pcm");
             int hexLen = hexStr.length();
-            if (hexLen > 3072) hexLen = 3072;
+            if (hexLen > 4096) hexLen = 4096;
             uint16_t head = audioTxHead;
             uint16_t tail = audioTxTail;
             for (int i = 0; i + 1 < hexLen; i += 2) {
